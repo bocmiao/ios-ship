@@ -17,6 +17,8 @@
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -340,6 +342,49 @@ def test_sensitive_paths():
         check(not is_s(p), f"不应该误报：{p}")
 
 
+def test_rename():
+    section("rename 一次改到所有位置")
+
+    tpl = HERE.parent / "template"
+    if not tpl.is_dir():
+        check(True, "跳过：没有 template 目录")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        ios = Path(td) / "ios"
+        shutil.copytree(tpl, ios)
+        shutil.copytree(HERE, ios / "tools")
+
+        r = subprocess.run(
+            [sys.executable, str(ios / "tools" / "ship.py"), "rename",
+             "--app-name", "PhotoHelper", "--bundle-id", "com.testuser.myapp"],
+            capture_output=True, text=True, errors="replace", cwd=str(ios),
+        )
+        check(r.returncode == 0, "rename 退出码 0", (r.stderr or r.stdout)[-300:])
+
+        yml = (ios / "project.yml").read_text(encoding="utf-8")
+        check("name: PhotoHelper" in yml, "project.yml 顶层 name 已改")
+        check("PRODUCT_BUNDLE_IDENTIFIER: com.testuser.myapp" in yml, "Bundle ID 已改")
+        check("bundleIdPrefix: com.testuser" in yml, "bundleIdPrefix 跟着改了")
+        # 只允许注释里还留着旧名当例子
+        check(yml.count("MyApp") <= 1, "target / scheme / build.targets 都改到了")
+
+        wf = (ios / ".github/workflows/ios.yml").read_text(encoding="utf-8")
+        check("name: iOS 构建并上传 TestFlight" in wf,
+              "workflow 自己的工作流名字没有被误改")
+        check("PROJECT: PhotoHelper" in wf and "APP_NAME: PhotoHelper" in wf,
+              "workflow 的四个 env 已改")
+        check("MyApp" not in wf and "com.example" not in wf, "workflow 里没有残留旧值")
+
+        # init 要能把改名后的值推断出来
+        r2 = subprocess.run([sys.executable, str(ios / "tools" / "ship.py"), "init"],
+                            capture_output=True, text=True, errors="replace", cwd=str(ios))
+        check(r2.returncode == 0, "rename 后 init 能跑")
+        cfg = json.loads((ios / "ship.config.json").read_text(encoding="utf-8"))
+        check(cfg.get("scheme") == "PhotoHelper", "init 推断出新 scheme")
+        check(cfg.get("bundleId") == "com.testuser.myapp", "init 推断出新 Bundle ID")
+
+
 def test_generic():
     section("通用性：没有写死某个项目的业务内容")
 
@@ -460,6 +505,7 @@ def main():
         test_version_bump,
         test_secrets_parsing,
         test_sensitive_paths,
+        test_rename,
         test_generic,
         test_tracked_secrets,
     ]

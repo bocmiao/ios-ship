@@ -15,15 +15,18 @@
 
 这个脚本把整条链路固化下来，一条命令跑完，并且**在做之前先告诉你哪一步会失败**。
 
-## 五个子命令
+## 八个子命令
 
+    ship.py rename     一次改完工程名与 Bundle ID（11 处，手工改必漏）
     ship.py doctor     全面体检，只读，不改变任何东西
     ship.py setup      首次配置：证书 + p12 + Bundle ID + 描述文件 + secrets.txt
     ship.py secrets    把 secrets.txt 里的值写进 GitHub 仓库
-    ship.py release    发版：build 号 +1 → 推送 → 触发构建 → 挂进测试组
+    ship.py release    发版：build 号 +1 → 推送 → 触发构建 → 等 VALID → 挂进测试组
     ship.py status     分发状态速查（比 doctor 短）
+    ship.py init       生成 ship.config.json（可选，能从 project.yml 推断）
+    ship.py deps       检查/安装依赖
 
-建议顺序：`doctor` → `setup`（仅首次）→ `secrets`（仅首次）→ `release`。
+建议顺序：`rename` → `deps` → `init` → `doctor` → `setup`（仅首次）→ `secrets`（仅首次）→ `release`。
 
 ## 为什么要有 doctor
 
@@ -351,12 +354,20 @@ def cmd_doctor(args):
                 fix="去 appstoreconnect.apple.com → 用户和访问 → 集成 → App Store Connect API → 团队密钥\n"
                     "建完立刻下载 .p8（离开页面就再也下不了），放到 cert 目录或 --p8 指定")
 
-    for f, label in [("distribution.key", "私钥"), ("distribution.cer", "证书"), ("distribution.p12", "p12")]:
+    chain_files = [("distribution.key", "私钥"),
+                   ("distribution.cer", "证书"),
+                   ("distribution.p12", "p12")]
+    missing_chain = []
+    for f, label in chain_files:
         p = cert_dir / f
         if p.exists():
             rep.ok(label, f"{f}  {p.stat().st_size} 字节")
         else:
-            rep.bad(f"缺 {f}", fix="跑 `ship.py setup` 生成")
+            missing_chain.append(f)
+    if missing_chain:
+        # 三件套是一次性生成的，拆成三条阻塞项只会让第一次体检看起来更糟。
+        rep.bad(f"证书链没生成（缺 {' / '.join(missing_chain)}）",
+                fix="跑 `ship.py setup` 一次生成私钥、证书、p12")
 
     if secrets:
         rep.ok("secrets.txt", f"{len(secrets)} 个键")
@@ -368,7 +379,9 @@ def cmd_doctor(args):
     # 就是永久记录——删掉文件、加 .gitignore 都改不了已经提交的历史。
     tracked = find_tracked_secrets()
     if tracked is None:
-        rep.warn("这个目录不是 git 仓库", "跳过「凭据是否误提交」检查")
+        # 第 7 组会再遇到一次；两处用同一句 msg，靠 Report 的去重合成一条
+        rep.warn("这个目录不是 git 仓库", "跳过「凭据是否误提交」检查",
+                 fix="`release` 要 commit + push，得先 git init 或 clone")
     elif tracked:
         rep.bad(f"{len(tracked)} 个凭据文件已经被 git 跟踪",
                 fix="\n".join(tracked[:5])
@@ -428,35 +441,39 @@ def cmd_doctor(args):
     bundle_id = args.bundle_id
     st, r = aa.api("GET", f"/v1/bundleIds?filter[identifier]={bundle_id}", token)
     ids = r.get("data", []) if st < 300 else []
-    if ids:
+    bundle_ok = bool(ids)
+    if bundle_ok:
         rep.ok("Bundle ID 已注册", bundle_id)
     else:
+        # 不在这里 return：后面「证书 / 描述文件 / GitHub」三组不依赖它，
+        # 提前返回的话用户要改一处跑一次，改三处就得跑四轮。
         rep.bad(f"Bundle ID 未注册：{bundle_id}",
                 fix="跑 `ship.py setup` 会自动建；或先在后台 Identifiers 里建一个")
-        rep.summary()
-        return 1
 
     # ---------- 3. App 记录
     rep.start("App 记录")
-    st, r = aa.api("GET", f"/v1/apps?filter[bundleId]={bundle_id}", token)
-    apps = r.get("data", []) if st < 300 else []
-    if not apps:
-        rep.bad("App Store Connect 里没有这个 App 的记录",
-                fix="Apple 没有开放创建 App 记录的 API，只能手动建一次：\n"
-                    "appstoreconnect.apple.com → 我的 App → + → 新建 App\n"
-                    "名称 / 主要语言 / Bundle ID 选上面那个 / SKU 随便填一个唯一值")
-        rep.summary()
-        return 1
+    app = None
+    if not bundle_ok:
+        note("跳过：Bundle ID 还没注册，不会有 App 记录")
+    else:
+        st, r = aa.api("GET", f"/v1/apps?filter[bundleId]={bundle_id}", token)
+        apps = r.get("data", []) if st < 300 else []
+        if apps:
+            app = apps[0]
+            app_name = app["attributes"]["name"]
+            state["app"] = app
+            rep.ok("App 记录存在", f"{app_name}  App ID {app['id']}")
 
-    app = apps[0]
-    app_name = app["attributes"]["name"]
-    state["app"] = app
-    rep.ok("App 记录存在", f"{app_name}  App ID {app['id']}")
-
-    if re.search(r"\b(sony|canon|nikon|fujifilm|panasonic|leica|apple)\b", app_name, re.I):
-        rep.warn(f"App 名含第三方商标：{app_name}",
-                 fix="内部 TestFlight 不受影响，但外部测试和上架会被 App Review 拒（指南 5.2.1）。\n"
-                     "只需在后台改「App 信息 → 名称」，不耗 build 号、不用重新构建。")
+            if re.search(r"\b(sony|canon|nikon|fujifilm|panasonic|leica|apple)\b",
+                         app_name, re.I):
+                rep.warn(f"App 名含第三方商标：{app_name}",
+                         fix="内部 TestFlight 不受影响，但外部测试和上架会被 App Review 拒（指南 5.2.1）。\n"
+                             "只需在后台改「App 信息 → 名称」，不耗 build 号、不用重新构建。")
+        else:
+            rep.bad("App Store Connect 里没有这个 App 的记录",
+                    fix="Apple 没有开放创建 App 记录的 API，只能手动建一次：\n"
+                        "appstoreconnect.apple.com → 我的 App → + → 新建 App\n"
+                        "名称 / 主要语言 / Bundle ID 选上面那个 / SKU 随便填一个唯一值")
 
     # ---------- 4. 证书
     rep.start("证书")
@@ -489,61 +506,67 @@ def cmd_doctor(args):
 
     # ---------- 6. 构建与分发
     rep.start("构建与分发")
-    st, r = aa.api("GET", f"/v1/builds?filter[app]={app['id']}&sort=-version&limit=5", token)
-    builds = r.get("data", []) if st < 300 else []
-    if not builds:
-        rep.warn("还没有任何构建", fix="跑 `ship.py release`")
+    if app is None:
+        note("跳过：这一组依赖 App 记录，上面那条建完再跑一次")
     else:
-        latest = builds[0]
-        ver = latest["attributes"]["version"]
-        ps = latest["attributes"]["processingState"]
-        rep.ok(f"最新 build {ver}", ps) if ps == "VALID" else rep.warn(f"最新 build {ver}", ps)
-
-        if bv is not None and ver == str(bv):
-            rep.ok("build 号已用掉", f"project.yml 现在是 {bv}，就是这一个")
-            rep.warn(f"下次发版会撞号：build {bv} 已经上传过，且上传不可撤销",
-                     fix="跑 `ship.py release`，它会自动 +1")
-        elif bv is not None and int(ver) > bv:
-            rep.bad(f"project.yml 的 build 号（{bv}）比线上最新的（{ver}）还小",
-                    fix="上传会被拒：bundle version must be higher than previously uploaded")
+        st, r = aa.api("GET", f"/v1/builds?filter[app]={app['id']}&sort=-version&limit=5", token)
+        builds = r.get("data", []) if st < 300 else []
+        if not builds:
+            rep.warn("还没有任何构建", fix="跑 `ship.py release`")
         else:
-            rep.ok("build 号可用", f"下一个将是 {bv + 1 if bv else '?'}")
+            latest = builds[0]
+            ver = latest["attributes"]["version"]
+            ps = latest["attributes"]["processingState"]
+            rep.ok(f"最新 build {ver}", ps) if ps == "VALID" else rep.warn(f"最新 build {ver}", ps)
 
-        # 测试组是「上传成功但装不上」的元凶
-        st, g = aa.api("GET", f"/v1/betaGroups?filter[app]={app['id']}&limit=20", token)
-        groups = g.get("data", []) if st < 300 else []
-        internal = [x for x in groups if x["attributes"].get("isInternalGroup")]
-        if not internal:
-            rep.bad("没有任何内部测试组 —— TestFlight 里会是空的",
-                    fix="跑 `ship.py release`，或 `testflight.py attach`")
-        else:
-            for grp in internal:
-                gd, gb, gt = tf.group_detail(aa, token, grp["id"])
-                vers = [x["attributes"]["version"] for x in gb]
-                mails = [x["attributes"].get("email") for x in gt]
-                if vers:
-                    rep.ok(f"内部组「{grp['attributes']['name']}」", f"含 build {vers}")
-                else:
-                    rep.warn(f"内部组「{grp['attributes']['name']}」是空的",
-                             fix="跑 `ship.py release` 把 build 挂进去")
-                if mails:
-                    rep.ok("测试员", str(mails))
-                else:
-                    rep.warn("内部组里没有测试员",
-                             fix="`testflight.py attach` 会把你自己的账号加进去")
+            if bv is not None and ver == str(bv):
+                rep.ok("build 号已用掉", f"project.yml 现在是 {bv}，就是这一个")
+                rep.warn(f"下次发版会撞号：build {bv} 已经上传过，且上传不可撤销",
+                         fix="跑 `ship.py release`，它会自动 +1")
+            elif bv is not None and int(ver) > bv:
+                rep.bad(f"project.yml 的 build 号（{bv}）比线上最新的（{ver}）还小",
+                        fix="上传会被拒：bundle version must be higher than previously uploaded")
+            else:
+                rep.ok("build 号可用", f"下一个将是 {bv + 1 if bv else '?'}")
 
-        st, bl = aa.api("GET", f"/v1/betaBuildLocalizations?filter[build]={latest['id']}", token)
-        if st < 300 and bl.get("data"):
-            rep.ok("TestFlight 测试文案", f"{len(bl['data'])} 条")
-        else:
-            rep.warn("build 没有「本次测试内容」",
-                     fix="TestFlight 里会显示空白，不影响安装；`testflight.py attach` 会补")
+            # 测试组是「上传成功但装不上」的元凶
+            st, g = aa.api("GET", f"/v1/betaGroups?filter[app]={app['id']}&limit=20", token)
+            groups = g.get("data", []) if st < 300 else []
+            internal = [x for x in groups if x["attributes"].get("isInternalGroup")]
+            if not internal:
+                rep.bad("没有任何内部测试组 —— TestFlight 里会是空的",
+                        fix="跑 `ship.py release`，或 `testflight.py attach`")
+            else:
+                for grp in internal:
+                    gd, gb, gt = tf.group_detail(aa, token, grp["id"])
+                    vers = [x["attributes"]["version"] for x in gb]
+                    mails = [x["attributes"].get("email") for x in gt]
+                    if vers:
+                        rep.ok(f"内部组「{grp['attributes']['name']}」", f"含 build {vers}")
+                    else:
+                        rep.warn(f"内部组「{grp['attributes']['name']}」是空的",
+                                 fix="跑 `ship.py release` 把 build 挂进去")
+                    if mails:
+                        rep.ok("测试员", str(mails))
+                    else:
+                        rep.warn("内部组里没有测试员",
+                                 fix="`testflight.py attach` 会把你自己的账号加进去")
+
+            st, bl = aa.api("GET", f"/v1/betaBuildLocalizations?filter[build]={latest['id']}", token)
+            if st < 300 and bl.get("data"):
+                rep.ok("TestFlight 测试文案", f"{len(bl['data'])} 条")
+            else:
+                rep.warn("build 没有「本次测试内容」",
+                         fix="TestFlight 里会显示空白，不影响安装；`testflight.py attach` 会补")
 
     # ---------- 7. GitHub
     rep.start("GitHub 仓库")
     rc, out, err = gh("secret", "list")
     if rc == 127:
         rep.warn("没装 gh CLI", fix="或者跳过——不影响构建，只影响从命令行写 secrets")
+    elif "not a git repository" in err.lower():
+        rep.warn("这个目录不是 git 仓库",
+                 fix="跳过 secrets 检查；`release` 要 commit + push，得先 git init 或 clone")
     elif rc != 0:
         rep.warn("读不到仓库 secrets", err.strip()[:120])
     else:
@@ -638,6 +661,116 @@ def cmd_secrets(args):
         bad(f"{len(failed)} 个写入失败：{', '.join(failed)}")
         return 1
     print(f"\n{C.G}全部写入完成。{C.X} 去 Actions 页面手动跑一次 `ios.yml` 验证。")
+    return 0
+
+
+# ------------------------------------------------------------------ rename
+
+# 名字在三个文件里散成 11 处：project.yml 里 7 处、两个 workflow 里 4 处。
+# 手工改必漏，而漏了不会立刻报错——要到 CI 的 archive 阶段才说找不到 scheme。
+#
+# 两个文件用不同的规则：workflow 顶部的 `name:` 是工作流名字，
+# 不是工程名，不能跟着改。
+_PROJECT_YML_RULES = [
+    (r"^(name:\s*)\S+", "name"),                          # 顶层，.xcodeproj 的名字
+    (r"(bundleIdPrefix:\s*)\S+", "prefix"),
+    (r"(PRODUCT_BUNDLE_IDENTIFIER:\s*)\S+", "bundle"),
+    (r"(CFBundleDisplayName:\s*)\S+", "name"),
+]
+_WORKFLOW_RULES = [
+    (r"(\bPROJECT:\s*)\S+", "name"),
+    (r"(\bSCHEME:\s*)\S+", "name"),
+    (r"(\bAPP_NAME:\s*)\S+", "name"),
+    (r"(\bBUNDLE_ID:\s*)\S+", "bundle"),
+]
+
+
+def cmd_rename(args):
+    """把工程名与 Bundle ID 改到所有出现的位置。
+
+    只改配置，不动 App 源码和目录名——源码目录叫 App 还是 Source 都不影响。
+    """
+    yml = IOS_DIR / "project.yml"
+    if not yml.exists():
+        bad("当前目录没有 project.yml", str(IOS_DIR))
+        return 1
+
+    txt = yml.read_text(encoding="utf-8")
+    m = re.search(r"^name:\s*(\S+)", txt, re.M)
+    old = m.group(1) if m else ""
+    mb = re.search(r"PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)", txt)
+    old_bundle = mb.group(1) if mb else ""
+
+    new = (args.app_name or "").strip()
+    if not new:
+        bad("要给 --app-name", f"当前工程名：{old or '(读不到)'}")
+        return 1
+    if not re.match(r"^[A-Za-z0-9_]+$", new):
+        bad("工程名只能用字母、数字、下划线", f"收到：{new}")
+        note("它会变成 target 名和 scheme 名，不能有空格、连字符、中文")
+        return 1
+
+    new_bundle = (args.bundle_id or old_bundle).strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9.\-]+$", new_bundle):
+        bad("Bundle ID 格式不对", f"收到：{new_bundle}")
+        return 1
+    prefix = ".".join(new_bundle.split(".")[:-1]) or new_bundle
+
+    print(f"\n  工程名    {old or '(空)'}  →  {new}")
+    print(f"  Bundle ID {old_bundle or '(空)'}  →  {new_bundle}")
+    print()
+
+    targets = [yml, IOS_DIR / ".github/workflows/ios.yml",
+               IOS_DIR / ".github/workflows/validate.yml"]
+    changed = 0
+    for path in targets:
+        if not path.exists():
+            continue
+        rules = _PROJECT_YML_RULES if path.name == "project.yml" else _WORKFLOW_RULES
+        raw = path.read_text(encoding="utf-8")
+        lines = raw.splitlines()
+        hits = []
+        out = []
+        for i, ln in enumerate(lines, 1):
+            if ln.lstrip().startswith("#"):
+                out.append(ln)
+                continue
+            before = ln
+            for pattern, kind in rules:
+                if not re.search(pattern, ln):
+                    continue
+                val = {"name": new, "bundle": new_bundle, "prefix": prefix}[kind]
+                ln = re.sub(pattern, lambda mm: mm.group(1) + val, ln, count=1)
+            # 剩下的旧名：targets 段、schemes 段、build.targets 里的键
+            if old and old != new and old in ln:
+                ln = ln.replace(old, new)
+            if ln != before:
+                hits.append((i, before.strip(), ln.strip()))
+            out.append(ln)
+
+        if not hits:
+            continue
+        changed += len(hits)
+        rel = path.relative_to(IOS_DIR)
+        print(f"  {rel}  {len(hits)} 处")
+        for i, before, after in hits:
+            print(f"    {i:3d}  {before}")
+            print(f"         {after}")
+        if args.dry_run:
+            continue
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    if not changed:
+        print(f"  没有可改的行。工程名可能已经是 {new}。")
+        return 0
+    if args.dry_run:
+        print(f"\n{C.D}dry-run，{changed} 处未写入。去掉 --dry-run 执行。{C.X}")
+        return 0
+
+    print(f"\n{C.G}改了 {changed} 处。{C.X}")
+    if old and old != new and (IOS_DIR / old).is_dir():
+        print(f"  源码目录 {old}/ 还在：可以改名并同步 project.yml 的 sources，也可以不改")
+    print("  下一步：python tools/ship.py init（重建配置）→ doctor")
     return 0
 
 
@@ -837,17 +970,19 @@ def main():
         description="没有 Mac 也能把 iOS App 发到 TestFlight",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""示例：
+  ship.py rename --app-name PhotoHelper --bundle-id com.you.photohelper
   ship.py doctor
   ship.py setup --bundle-id com.example.myapp
-  ship.py setup --bundle-id com.example.myapp --reuse-cert ../old/cert
+  ship.py setup --reuse-cert ../old/cert
   ship.py secrets
   ship.py release
 """,
     )
     ap.add_argument("action",
                     choices=["doctor", "setup", "secrets", "release", "status",
-                             "init", "deps"],
+                             "init", "deps", "rename"],
                     help="要做什么")
+    ap.add_argument("--app-name", default="", help="rename 时的新工程名（字母数字下划线）")
     ap.add_argument("--bundle-id", default="", help="不填就从 project.yml / ship.config.json 推断")
     ap.add_argument("--profile", default="", help="描述文件名，默认 <scheme> AppStore")
     ap.add_argument("--p8", default="")
@@ -888,7 +1023,7 @@ def main():
     # 如果这个脚本被直接放在别处跑（比如刚从 skill 里复制出来），
     # 报「找不到 project.yml」比抛一堆 FileNotFoundError 好懂得多。
     # status 只查 API，不依赖本地工程，所以不拦。
-    if args.action in ("doctor", "release"):
+    if args.action in ("doctor", "release", "rename"):
         if not (IOS_DIR / "project.yml").exists():
             print(f"\n{C.R}这个脚本得放在 iOS 项目的 tools/ 目录下。{C.X}\n")
             print(f"  当前位置：{HERE}")
@@ -938,6 +1073,8 @@ def main():
 
     if args.action == "doctor":
         return cmd_doctor(args)
+    if args.action == "rename":
+        return cmd_rename(args)
     if args.action == "setup":
         return cmd_setup(args)
     if args.action == "secrets":

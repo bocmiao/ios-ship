@@ -37,7 +37,7 @@
 
 账号首次使用 API 需先点「请求访问权限」并通过审核，否则 API 调用一律拒绝。
 
-### 2. 复制到项目里
+### 2. 复制到项目里并改名
 
 ```bash
 git clone https://github.com/bocmiao/ios-ship
@@ -48,25 +48,16 @@ cp -r ios-ship/template/.  <你的iOS项目>/ios/
 
 `template/.` 末尾的点用于一并复制 `.github` 与 `.gitignore`。写成 `template/*` 会漏掉这两项。
 
-修改 `project.yml` 中的工程名、`bundleIdPrefix` 和 target 名：
+工程名和 Bundle ID 在 3 个文件里散落 11 处，用一条命令改完：
 
-```yaml
-name: MyApp
-options:
-  bundleIdPrefix: com.example
-targets:
-  MyApp:
+```bash
+cd <你的iOS项目>/ios
+python tools/ship.py rename --app-name PhotoHelper --bundle-id com.testuser.myapp
 ```
 
-修改 `ios.yml` 与 `validate.yml` 顶部的 `env`，四个值与上面保持一致：
+它会改 `project.yml` 的 `name`、target 名、scheme 名、`build.targets`、`CFBundleDisplayName`、`bundleIdPrefix`、`PRODUCT_BUNDLE_IDENTIFIER`，以及两个 workflow 的 `PROJECT` / `SCHEME` / `APP_NAME` / `BUNDLE_ID`。每处改动都会打印出来，加 `--dry-run` 只看不写。
 
-```yaml
-env:
-  PROJECT: MyApp              # project.yml 里的 name
-  SCHEME: MyApp               # project.yml 里 schemes 下的 key
-  APP_NAME: MyApp             # target 名，决定 ipa 文件名
-  BUNDLE_ID: com.example.myapp
-```
+工程名只能用字母、数字、下划线，它会成为 target 名和 scheme 名。`--bundle-id` 不传则沿用模板里的值。
 
 ### 3. 生成配置
 
@@ -362,6 +353,7 @@ cmd.exe 按 OEM 代码页解码输出。`ship.cmd` 内部执行 `chcp 65001`；�
 |---|---|---|
 | `ship.py deps` | 检查依赖，缺失时安装 | 安装 Python 包，安装前询问 |
 | `ship.py doctor` | 七组检查 | 只读 |
+| `ship.py rename` | 一次改完工程名与 Bundle ID（11 处） | 改 `project.yml` 与两个 workflow |
 | `ship.py init` | 生成 `ship.config.json` | 写一个配置文件 |
 | `ship.py setup` | 生成整套证书链 | 调用 API 创建资源，可能占用证书名额 |
 | `ship.py secrets` | 把 8 个 secrets 写入 GitHub | 修改仓库设置 |
@@ -369,7 +361,7 @@ cmd.exe 按 OEM 代码页解码输出。`ship.cmd` 内部执行 `chcp 65001`；�
 | `ship.py status` | 查询分发状态 | 只读 |
 | `testflight.py attach` | 单独加入 build、添加测试员、补 TestFlight 文案 | 写 App Store Connect |
 | `make-icon.py` | 生成图标与 asset catalog | 写文件 |
-| `selftest.py` | 89 条离线断言 | 只读 |
+| `selftest.py` | 100 条离线断言 | 只读 |
 
 `setup` 参数：
 
