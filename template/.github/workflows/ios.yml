@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: 取代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 环境信息放最前面：每次运行都能看到 runner 给的是什么系统、什么 Xcode。
       # App Store 对 SDK 版本有要求，这个信息越早知道越好。
@@ -225,7 +225,7 @@ jobs:
 
       - name: 失败时把关键产物留下来
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs
           path: |
