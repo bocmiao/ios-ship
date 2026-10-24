@@ -48,7 +48,7 @@
 理由：在 Windows 上让一个新手装 Python 已经够难了，再加一句 `pip install -r requirements.txt` 会多出一整类失败（网络、代理、pip 版本、venv 忘了激活）。所以：
 
 - 能用标准库解决的一律用标准库 —— 包括手搓 PTP 容器、手搓 JWT、用正则读 `project.yml` 而不是引入 PyYAML
-- 真正绕不过去的只有一件事：EC 私钥、CSR、PKCS#12 这些密码学操作，标准库没有。`cryptography` 是这里的唯一选择
+- 无法绕过的只有一件事：EC 私钥、CSR、PKCS#12 这些密码学操作，标准库没有。`cryptography` 是唯一选择
 - 依赖检查放在 `ship.py deps` 里，清单写在代码的 `DEPS` 常量而不是文档里（文档会过期，代码不会）
 
 `init` 和 `secrets` 是纯标准库，即使 `cryptography` 没装也能跑。`ship.cmd` 因此能直接双击，不需要先激活任何环境。
@@ -146,7 +146,7 @@ secrets.txt（8 个键）
 4. DEFAULTS             全 None，validate() 会报缺
 ```
 
-不引入 PyYAML：`project.yml` 是我们自己的配置文件，格式稳定，正则够了。少一个依赖，`ship.cmd` 就少一条失败路径。
+不引入 PyYAML：`project.yml` 是固定格式的项目自有配置，正则足够。少一个依赖，`ship.cmd` 就少一条失败路径。
 
 | 键 | 从 project.yml 怎么推断 | 缺了会怎样 |
 |---|---|---|

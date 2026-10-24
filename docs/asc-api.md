@@ -129,7 +129,7 @@ payload: {"iss":"<Issuer ID>","iat":<now>,"exp":<now+900>,"aud":"appstoreconnect
 409 常见 `code`：
 
 - `ENTITY_ERROR.ATTRIBUTE.INVALID.DUPLICATE` — build 号重复
-- `ENTITY_ERROR.RELATIONSHIP.INVALID.INVALID_STATE` — 版本号不匹配，**或上传其实成功了**
+- `ENTITY_ERROR.RELATIONSHIP.INVALID.INVALID_STATE` — 版本号不匹配，或上传已成功
 - `ENTITY_ERROR.ATTRIBUTE.INVALID` — 字段值非法（locale 等）
 
 ## 响应格式
