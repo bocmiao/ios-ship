@@ -1,0 +1,98 @@
+name: 自测
+
+# 这条流水线不联网、不调 Apple API、不需要任何密钥，几十秒跑完。
+# 它挡的是「改一行推断逻辑就悄悄坏掉」这类问题——比如 project.yml 的
+# xcodeDir 被当成 target 名，doctor 会去错误的位置找图标，然后报「缺图标」。
+#
+# 不是签名的替代品，是给 tools/ 这堆脚本兜底的单元测试。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 是 README 承诺的最低版本，别让它在无人知晓的情况下坏掉
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 离线自测
+        run: python tools/selftest.py
+
+  template-smoke:
+    # 按 README 的接入步骤，在干净目录里真的装一遍，
+    # 确认 copy 过去的命令能跑、配置能推断出来。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 按 README 装进一个空项目
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/proj/ios
+          cp -r tools /tmp/proj/ios/tools
+          cp -r template/. /tmp/proj/ios/
+          cd /tmp/proj/ios
+          test -f .github/workflows/ios.yml || { echo "::error::点文件没复制过去"; exit 1; }
+
+      - name: init 能从 project.yml 推断出配置
+        run: |
+          set -euo pipefail
+          cd /tmp/proj/ios
+          python tools/ship.py init
+          python - <<'PY'
+          import json
+          c = json.load(open("ship.config.json"))
+          want = {"bundleId": "com.example.myapp", "scheme": "MyApp", "xcodeDir": "App"}
+          for k, v in want.items():
+              assert c.get(k) == v, f"{k}: got {c.get(k)!r}, want {v!r}"
+          print("配置推断正确：", {k: c[k] for k in want})
+          PY
+
+      - name: doctor 在未配置状态下要给出可读的指引而不是崩栈
+        run: |
+          set -euo pipefail
+          cd /tmp/proj/ios
+          # 期望退出码 1（有阻塞项），但不能抛 Traceback
+          set +e
+          out=$(python tools/ship.py doctor 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          test "$rc" -eq 1 || { echo "::error::doctor 退出码应为 1，实际 $rc"; exit 1; }
+          if echo "$out" | grep -q "Traceback"; then
+            echo "::error::doctor 抛异常了"
+            exit 1
+          fi
+          echo "$out" | grep -q "阻塞项" || { echo "::error::没有输出阻塞项汇总"; exit 1; }
+
+      - name: 放错目录时要说明怎么放对
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wrong && cp -r tools /tmp/wrong/tools
+          cd /tmp/wrong
+          set +e
+          out=$(python tools/ship.py doctor 2>&1)
+          set -e
+          echo "$out"
+          echo "$out" | grep -q "project.yml" || { echo "::error::没提示期望的 project.yml 位置"; exit 1; }

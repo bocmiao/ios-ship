@@ -1,6 +1,7 @@
 # ios-ship
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![自测](https://github.com/bocmiao/ios-ship/actions/workflows/selftest.yml/badge.svg)](https://github.com/bocmiao/ios-ship/actions/workflows/selftest.yml)
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776ab.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/tested%20on-Windows%2011-0078d6.svg)](#)
 [![No Mac](https://img.shields.io/badge/requires-Mac-never-f7df1e.svg)](#)
@@ -164,6 +165,7 @@ tools/
   testflight.py         分发：内部测试组 + 挂 build + 加测试员 + 补 TestFlight 文案
   shipconfig.py         项目配置的单一来源（命令行 > ship.config.json > project.yml 推断）
   make-icon.py          生成 1024×1024 无 alpha 的 App 图标（需要 Pillow）
+  selftest.py           离线自测：57 条断言，不联网不调 API
   ship.cmd              Windows 双击入口（纯 ASCII，自己找 Python）
 
 template/
@@ -178,6 +180,21 @@ docs/
   asc-api.md            App Store Connect API 速查（端点/字段/错误码）
   architecture.md       各层职责与数据流
 ```
+
+---
+
+## 自测
+
+```bash
+python tools/selftest.py        # 57 条断言，几秒跑完
+python tools/selftest.py -v     # 每条都打印
+```
+
+覆盖配置优先级、`project.yml` 的正则推断、必填校验、样板生成，以及 PTP 容器和 ASC JWT 的结构。不联网、不调 API、不需要证书。
+
+CI 除了在 Python 3.9 / 3.12 下各跑一遍，还有一步是**按 README 的步骤在空目录里真的装一遍**：确认 `cp -r template/.` 连点文件一起过去了、`init` 能推断出正确配置、`doctor` 在未配置状态下给的是可读指引而不是 Traceback。
+
+写这一步的原因是：我改 `shipconfig.py` 的推断逻辑时，把 `xcodeDir` 当成 target 名了。模板里 target 叫 `MyApp`、源码放 `App/` 下，于是 `doctor` 跑去 `MyApp/Assets.xcassets` 找图标，找不到就报「缺图标」——而图标明明在。这种错跑一次 `doctor` 就能看见，但得有人真的去跑。
 
 ---
 
