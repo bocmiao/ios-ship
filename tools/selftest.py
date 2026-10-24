@@ -385,6 +385,48 @@ def test_rename():
         check(cfg.get("bundleId") == "com.testuser.myapp", "init 推断出新 Bundle ID")
 
 
+def test_new():
+    section("new 一条命令建项目")
+
+    if not (HERE.parent / "template").is_dir():
+        check(True, "跳过：没有 template 目录")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "PhotoHelper"
+        r = subprocess.run(
+            [sys.executable, str(HERE / "ship.py"), "new", str(dest),
+             "--bundle-id", "com.testuser.photohelper"],
+            capture_output=True, text=True, errors="replace",
+        )
+        check(r.returncode == 0, "new 退出码 0", (r.stderr or r.stdout)[-300:])
+
+        ios = dest / "ios"
+        check((ios / "project.yml").exists(), "生成了 project.yml")
+        check((ios / "App/ContentView.swift").exists(), "生成了 App 源码")
+        check((ios / ".github/workflows/ios.yml").exists(), "点文件跟着过来了")
+        check((ios / ".gitignore").exists(), "带 .gitignore")
+        check((ios / "tools/ship.py").exists(), "带 tools")
+        check(not (ios / "tools/cert").exists(), "没有把 cert 目录复制进去")
+        check(not (ios / "tools/__pycache__").exists(), "没有把 __pycache__ 复制进去")
+
+        yml = (ios / "project.yml").read_text(encoding="utf-8")
+        check("name: PhotoHelper" in yml, "工程名已改")
+        check("PRODUCT_BUNDLE_IDENTIFIER: com.testuser.photohelper" in yml, "Bundle ID 已改")
+
+        wf = (ios / ".github/workflows/ios.yml").read_text(encoding="utf-8")
+        check("name: iOS 构建并上传 TestFlight" in wf, "工作流名字没被误改")
+        check("BUNDLE_ID: com.testuser.photohelper" in wf, "workflow 的 Bundle ID 已改")
+
+        # 目录非空时要拒绝，避免覆盖别人的项目
+        r2 = subprocess.run(
+            [sys.executable, str(HERE / "ship.py"), "new", str(dest),
+             "--bundle-id", "com.testuser.other"],
+            capture_output=True, text=True, errors="replace",
+        )
+        check(r2.returncode != 0, "目标目录已存在时拒绝执行")
+
+
 def test_generic():
     section("通用性：没有写死某个项目的业务内容")
 
@@ -506,6 +548,7 @@ def main():
         test_secrets_parsing,
         test_sensitive_paths,
         test_rename,
+        test_new,
         test_generic,
         test_tracked_secrets,
     ]

@@ -52,6 +52,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -685,6 +686,118 @@ _WORKFLOW_RULES = [
 ]
 
 
+def _rewrite_names(ios_dir, old, new, new_bundle, dry_run=False):
+    """改 project.yml 与两个 workflow 里的名字。
+
+    返回 [(相对路径, [(行号, 旧行, 新行), ...]), ...]。
+    """
+    ios_dir = Path(ios_dir)
+    prefix = ".".join(new_bundle.split(".")[:-1]) or new_bundle
+    result = []
+
+    for rel in ("project.yml", ".github/workflows/ios.yml", ".github/workflows/validate.yml"):
+        path = ios_dir / rel
+        if not path.exists():
+            continue
+        rules = _PROJECT_YML_RULES if path.name == "project.yml" else _WORKFLOW_RULES
+        lines = path.read_text(encoding="utf-8").splitlines()
+        hits, out = [], []
+        for i, ln in enumerate(lines, 1):
+            if ln.lstrip().startswith("#"):
+                out.append(ln)
+                continue
+            before = ln
+            for pattern, kind in rules:
+                if not re.search(pattern, ln):
+                    continue
+                val = {"name": new, "bundle": new_bundle, "prefix": prefix}[kind]
+                ln = re.sub(pattern, lambda mm: mm.group(1) + val, ln, count=1)
+            # 剩下的旧名：targets 段、schemes 段、build.targets 里的键
+            if old and old != new and old in ln:
+                ln = ln.replace(old, new)
+            if ln != before:
+                hits.append((i, before.strip(), ln.strip()))
+            out.append(ln)
+
+        if not hits:
+            continue
+        result.append((rel, hits))
+        if not dry_run:
+            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+    return result
+
+
+def cmd_new(args):
+    """从仓库里的 template 建一个新项目：复制 + 改名，一条命令。
+
+    存在的理由：README 原来让用户敲 `cp -r template/. <你的iOS项目>/ios`，
+    而 Windows 的 cmd 里没有 cp，`<...>` 还会被当成重定向符。
+    `new` 只用 Python 标准库，三个平台都能跑。
+    """
+    tpl = HERE.parent / "template"
+    if not tpl.is_dir():
+        bad("找不到 template 目录", str(tpl))
+        note("`new` 要在 clone 下来的仓库里跑：")
+        note("  git clone https://github.com/bocmiao/ios-ship")
+        note("  python ios-ship/tools/ship.py new PhotoHelper --bundle-id com.you.photohelper")
+        return 1
+
+    if not args.target:
+        bad("要给一个目标目录名", "例如：ship.py new PhotoHelper --bundle-id com.you.photohelper")
+        return 1
+
+    dest = Path(args.target).expanduser()
+    if not dest.is_absolute():
+        dest = (Path.cwd() / dest).resolve()
+    ios = dest / "ios"
+
+    if ios.exists() and any(ios.iterdir()) and not args.force:
+        bad(f"{ios} 已经存在且不是空的", "换个目录名，或加 --force 覆盖同名文件")
+        return 1
+
+    name = (args.app_name or dest.name).strip()
+    if not re.match(r"^[A-Za-z0-9_]+$", name):
+        bad("工程名只能用字母、数字、下划线", f"收到：{name}")
+        note("可以显式指定：--app-name PhotoHelper")
+        return 1
+
+    bundle = (args.bundle_id or "").strip()
+    if not bundle:
+        bad("要给 --bundle-id", "格式是反域名，例如 com.yourname.photohelper")
+        note("它会成为 App 的唯一标识，上架后不能改")
+        return 1
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9.\-]+$", bundle) or "." not in bundle:
+        bad("Bundle ID 格式不对", f"收到：{bundle}")
+        return 1
+
+    ios.mkdir(parents=True, exist_ok=True)
+    # 不复制 cert（可能藏着别人的凭据）、不复制缓存和上次的配置
+    ignore = shutil.ignore_patterns("__pycache__", "cert", "ship.config.json", "*.pyc")
+    shutil.copytree(HERE, ios / "tools", ignore=ignore, dirs_exist_ok=True)
+    shutil.copytree(tpl, ios, dirs_exist_ok=True)
+
+    m = re.search(r"^name:\s*(\S+)", (ios / "project.yml").read_text(encoding="utf-8"), re.M)
+    old = m.group(1) if m else ""
+    result = _rewrite_names(ios, old, name, bundle)
+    changed = sum(len(h) for _, h in result)
+
+    print(f"\n  已创建 {dest}")
+    print(f"  工程名    {old}  →  {name}")
+    print(f"  Bundle ID →  {bundle}")
+    print(f"  改写了 {changed} 处（project.yml 与两个 workflow）")
+    print()
+    print("  里面是一个能编译的最小 SwiftUI 工程：")
+    print(f"    {ios / 'App' / 'ContentView.swift'}   改这个文件写你的界面")
+    print()
+    print("  下一步：")
+    print(f"    cd {ios}")
+    print("    python tools/ship.py deps")
+    print("    python tools/ship.py init")
+    print("    python tools/ship.py doctor")
+    return 0
+
+
 def cmd_rename(args):
     """把工程名与 Bundle ID 改到所有出现的位置。
 
@@ -714,51 +827,18 @@ def cmd_rename(args):
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9.\-]+$", new_bundle):
         bad("Bundle ID 格式不对", f"收到：{new_bundle}")
         return 1
-    prefix = ".".join(new_bundle.split(".")[:-1]) or new_bundle
 
     print(f"\n  工程名    {old or '(空)'}  →  {new}")
     print(f"  Bundle ID {old_bundle or '(空)'}  →  {new_bundle}")
     print()
 
-    targets = [yml, IOS_DIR / ".github/workflows/ios.yml",
-               IOS_DIR / ".github/workflows/validate.yml"]
-    changed = 0
-    for path in targets:
-        if not path.exists():
-            continue
-        rules = _PROJECT_YML_RULES if path.name == "project.yml" else _WORKFLOW_RULES
-        raw = path.read_text(encoding="utf-8")
-        lines = raw.splitlines()
-        hits = []
-        out = []
-        for i, ln in enumerate(lines, 1):
-            if ln.lstrip().startswith("#"):
-                out.append(ln)
-                continue
-            before = ln
-            for pattern, kind in rules:
-                if not re.search(pattern, ln):
-                    continue
-                val = {"name": new, "bundle": new_bundle, "prefix": prefix}[kind]
-                ln = re.sub(pattern, lambda mm: mm.group(1) + val, ln, count=1)
-            # 剩下的旧名：targets 段、schemes 段、build.targets 里的键
-            if old and old != new and old in ln:
-                ln = ln.replace(old, new)
-            if ln != before:
-                hits.append((i, before.strip(), ln.strip()))
-            out.append(ln)
-
-        if not hits:
-            continue
-        changed += len(hits)
-        rel = path.relative_to(IOS_DIR)
+    result = _rewrite_names(IOS_DIR, old, new, new_bundle, dry_run=args.dry_run)
+    changed = sum(len(h) for _, h in result)
+    for rel, hits in result:
         print(f"  {rel}  {len(hits)} 处")
         for i, before, after in hits:
             print(f"    {i:3d}  {before}")
             print(f"         {after}")
-        if args.dry_run:
-            continue
-        path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
     if not changed:
         print(f"  没有可改的行。工程名可能已经是 {new}。")
@@ -979,10 +1059,12 @@ def main():
 """,
     )
     ap.add_argument("action",
-                    choices=["doctor", "setup", "secrets", "release", "status",
+                    choices=["new", "doctor", "setup", "secrets", "release", "status",
                              "init", "deps", "rename"],
                     help="要做什么")
-    ap.add_argument("--app-name", default="", help="rename 时的新工程名（字母数字下划线）")
+    ap.add_argument("target", nargs="?", default="",
+                    help="new 的目标目录名，例如 PhotoHelper")
+    ap.add_argument("--app-name", default="", help="工程名（rename / new 用，字母数字下划线）")
     ap.add_argument("--bundle-id", default="", help="不填就从 project.yml / ship.config.json 推断")
     ap.add_argument("--profile", default="", help="描述文件名，默认 <scheme> AppStore")
     ap.add_argument("--p8", default="")
@@ -1000,6 +1082,10 @@ def main():
     ap.add_argument("--feedback-email", default="",
                     help="TestFlight 反馈邮箱，默认取 ship.config.json 或 noreply@example.com")
     args = ap.parse_args()
+
+    # ---------- new：从 template 建一个新项目，只在仓库里跑
+    if args.action == "new":
+        return cmd_new(args)
 
     # ---------- deps：查/装依赖，不碰项目配置
     if args.action == "deps":

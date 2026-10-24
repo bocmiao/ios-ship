@@ -63,7 +63,7 @@ tools/
   testflight.py         分发：内部测试组 + 挂 build + 加测试员 + 补 TestFlight 文案
   shipconfig.py         项目配置的单一来源（命令行 > ship.config.json > project.yml 推断）
   make-icon.py          生成 1024×1024 无 alpha 的 App 图标（需要 Pillow）
-  selftest.py           离线自测：100 条断言，不联网不调 API
+  selftest.py           离线自测：113 条断言，不联网不调 API
   ship.cmd              Windows 双击入口（纯 ASCII，自行探测 Python）
 
 template/
@@ -84,7 +84,7 @@ docs/
 ## 实测数据
 
 - 一次完整构建：3 分 45 秒（macOS runner，含签名、导出、上传）
-- 离线自测：100 条断言，3 秒内跑完
+- 离线自测：113 条断言，3 秒内跑完
 - TestFlight build 有效期：90 天
 - 团队 Distribution 证书上限：2 张，不随时间恢复
 - macOS runner：public 仓库免费；private 仓库 200 分钟/月，超出 $0.062/分钟
@@ -115,7 +115,7 @@ docs/
 ## 开发
 
 ```bash
-python tools/selftest.py        # 100 条断言，几秒跑完
+python tools/selftest.py        # 113 条断言，几秒跑完
 python tools/selftest.py -v     # 每条都打印
 ```
 
