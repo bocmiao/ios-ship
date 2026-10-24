@@ -33,6 +33,33 @@ jobs:
       - name: 离线自测
         run: python tools/selftest.py
 
+      - name: 文档相对链接都指向真实文件
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, os, re, sys
+
+          bad = []
+          link = re.compile(r"\]\(([^)\s]+)\)")
+          for md in glob.glob("*.md") + glob.glob("docs/*.md"):
+              base = os.path.dirname(md)
+              for target in link.findall(open(md, encoding="utf-8").read()):
+                  if target.startswith(("http://", "https://", "mailto:", "#")):
+                      continue
+                  path = target.split("#")[0]
+                  if not path:
+                      continue
+                  if not os.path.exists(os.path.join(base, path)):
+                      bad.append(f"{md} -> {target}")
+
+          if bad:
+              print("::error::这些链接指向不存在的文件")
+              for b in bad:
+                  print("  " + b)
+              sys.exit(1)
+          print("相对链接全部有效")
+          PY
+
   template-smoke:
     # 按 README 的接入步骤，在干净目录里真的装一遍，
     # 确认 copy 过去的命令能跑、配置能推断出来。
@@ -53,7 +80,12 @@ jobs:
           cp -r tools /tmp/proj/ios/tools
           cp -r template/. /tmp/proj/ios/
           cd /tmp/proj/ios
+          # 点文件必须跟着 template/. 一起过来，否则 .github 和 .gitignore 都会丢
           test -f .github/workflows/ios.yml || { echo "::error::点文件没复制过去"; exit 1; }
+          # .gitignore 丢了 = 签名材料会被宿主项目跟踪，这是最危险的一种缺失
+          test -f .gitignore || { echo "::error::模板没带 .gitignore"; exit 1; }
+          grep -q "secrets.txt" .gitignore || { echo "::error::.gitignore 没排 secrets.txt"; exit 1; }
+          grep -q "\*.p12" .gitignore || { echo "::error::.gitignore 没排 *.p12"; exit 1; }
 
       - name: init 能从 project.yml 推断出配置
         run: |

@@ -152,6 +152,44 @@ def gh(*args, check=False):
         return 127, "", "找不到 gh 命令（GitHub CLI 没装或不在 PATH 里）"
 
 
+def git(*args):
+    """调 git。返回 (returncode, stdout, stderr)。
+
+    cwd 用 IOS_DIR 而不是仓库根：ios/ 可能只是大仓库的一个子目录，
+    在这里跑 `git ls-files` 只会列出 ios/ 下的文件，正好是我们关心的范围。
+    """
+    try:
+        r = subprocess.run(["git"] + list(args), capture_output=True, text=True,
+                           errors="replace", cwd=str(IOS_DIR))
+        return r.returncode, r.stdout, r.stderr
+    except FileNotFoundError:
+        return 127, "", "找不到 git 命令"
+
+
+# 哪些文件名一旦被 git 跟踪就必须立刻处理。
+# 判断只看路径和扩展名，不读内容——读内容会把密码读进内存，没必要。
+SENSITIVE_SUFFIX = (".p8", ".p12", ".key", ".mobileprovision", ".cer")
+SENSITIVE_NAME = ("secrets.txt", "AuthKey.p8")
+
+
+def is_sensitive_path(path):
+    name = path.rsplit("/", 1)[-1]
+    if name in SENSITIVE_NAME:
+        return True
+    if name.startswith("AuthKey_") and name.endswith(".p8"):
+        return True
+    return path.lower().endswith(SENSITIVE_SUFFIX)
+
+
+def find_tracked_secrets():
+    """返回被 git 跟踪的敏感文件列表；不是 git 仓库时返回 None。"""
+    rc, out, _ = git("ls-files")
+    if rc != 0:
+        return None
+    return [line for line in out.splitlines()
+            if line.strip() and is_sensitive_path(line.strip())]
+
+
 def read_pyproject_version():
     """从 project.yml 读出版本号。返回 (marketing, build) 或 (None, None)。"""
     p = IOS_DIR / "project.yml"
@@ -324,6 +362,22 @@ def cmd_doctor(args):
         rep.ok("secrets.txt", f"{len(secrets)} 个键")
     else:
         rep.warn("没有 cert/secrets.txt", fix="跑 `ship.py setup` 生成")
+
+    # 凭据有没有被 git 跟踪。
+    # 这一条比「本地文件在不在」重要得多：文件在本地只是方便，进了 Git
+    # 就是永久记录——删掉文件、加 .gitignore 都改不了已经提交的历史。
+    tracked = find_tracked_secrets()
+    if tracked is None:
+        rep.warn("这个目录不是 git 仓库", "跳过「凭据是否误提交」检查")
+    elif tracked:
+        rep.bad(f"{len(tracked)} 个凭据文件已经被 git 跟踪",
+                fix="\n".join(tracked[:5])
+                    + ("\n..." if len(tracked) > 5 else "")
+                    + "\n立刻执行：git rm --cached <上面这些路径>"
+                    + "\n然后确认 .gitignore 里有 cert/ 、*.p8 、*.p12 、secrets.txt"
+                    + "\n如果推过公共仓库，按 docs/pitfalls.md 第 17 条评估要不要轮换密码")
+    else:
+        rep.ok("凭据没有进 Git")
 
     mv, bv = read_pyproject_version()
     if mv and bv is not None:
@@ -520,11 +574,14 @@ def cmd_doctor(args):
 
 def cmd_setup(args):
     """转调 apple-auto.py。它已经把整条证书链做完了，这里只负责把参数对齐。"""
+    # --cert-dir 要真的生效：doctor 用它找材料，setup 却写死 tools/cert 的话，
+    # 用户指定了目录会两边对不上（材料写进 A、体检去 B 找）。
+    out_dir = Path(args.cert_dir) if args.cert_dir else (HERE / "cert")
     argv = [
         sys.executable, str(HERE / "apple-auto.py"),
         "--bundle-id", args.bundle_id,
         "--profile", args.profile,
-        "--out", str(HERE / "cert"),
+        "--out", str(out_dir),
     ]
     if args.p8:
         argv += ["--p8", args.p8]
@@ -695,6 +752,87 @@ def cmd_release(args):
     return 0
 
 
+# ------------------------------------------------------------------ 依赖
+
+# 真依赖清单。写在这里而不是散在文档里，因为文档会过期、这个不会。
+#   cryptography —— CSR 生成、ES256 签 JWT。setup / doctor / status / release 要用。
+#   pillow       —— 只有 make-icon.py 画图要用，可选。
+DEPS = [
+    ("cryptography", "import cryptography", True,
+     "证书申请与 API 鉴权（CSR / ES256 JWT）"),
+    ("pillow", "from PIL import Image", False,
+     "生成 App 图标（可选，你有自己的 PNG 就不用装）"),
+]
+
+
+def check_dep(import_stmt):
+    try:
+        exec(import_stmt, {})
+        return True
+    except Exception:
+        return False
+
+
+def cmd_deps(args):
+    """检查并安装依赖。装的时候用当前这个 Python 的 -m pip，保证装进同一个环境。"""
+    print()
+    missing = []
+    for name, stmt, required, why in DEPS:
+        has = check_dep(stmt)
+        tag = "必需" if required else "可选"
+        if has:
+            ok(f"{name}（{tag}）", why)
+        else:
+            warn(f"{name} 没装（{tag}）", why)
+            missing.append((name, required))
+
+    print()
+    if not missing:
+        print(f"{C.G}依赖齐了。{C.X}")
+        return 0
+
+    to_install = [n for n, req in missing if req or args.install_optional]
+    if not to_install:
+        print(f"{C.Y}只是缺可选的包，不影响发版。{C.X}")
+        print(f"  要装的话：{sys.executable} -m pip install pillow")
+        return 0
+
+    pkgs = " ".join(to_install)
+    cmd = [sys.executable, "-m", "pip", "install"] + to_install
+    print(f"{C.D}将执行：{' '.join(cmd)}{C.X}")
+
+    if args.dry_run:
+        print(f"{C.D}dry-run，没有真的装。{C.X}")
+        return 0
+
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(f"\n{C.Y}非交互环境，没有自动安装。请手动执行上面的命令。{C.X}")
+            return 1
+        ans = input("现在安装吗？[Y/n] ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print(f"\n{C.Y}没装。需要的时候跑 `ship.py deps --yes`。{C.X}")
+            return 1
+
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        bad("安装失败")
+        note("常见原因：没联网、公司代理、或 pip 版本太旧")
+        note(f"可以先试 {sys.executable} -m ensurepip --upgrade")
+        return 1
+
+    # 装完立刻复验，别让「pip 说成功但其实装到别的解释器去了」蒙混过关
+    print()
+    still = [name for name, stmt, _req, _why in DEPS
+             if name in to_install and not check_dep(stmt)]
+    if still:
+        bad(f"装完了还是找不到：{', '.join(still)}")
+        note(f"确认装的时候用的是这个解释器：{sys.executable}")
+        return 1
+    print(f"{C.G}装好了，现在可以跑 `ship.py setup`。{C.X}")
+    return 0
+
+
 # ------------------------------------------------------------------ 入口
 
 def main():
@@ -710,7 +848,8 @@ def main():
 """,
     )
     ap.add_argument("action",
-                    choices=["doctor", "setup", "secrets", "release", "status", "init"],
+                    choices=["doctor", "setup", "secrets", "release", "status",
+                             "init", "deps"],
                     help="要做什么")
     ap.add_argument("--bundle-id", default="", help="不填就从 project.yml / ship.config.json 推断")
     ap.add_argument("--profile", default="", help="描述文件名，默认 <scheme> AppStore")
@@ -723,9 +862,15 @@ def main():
                     help="复用已有证书目录（含 distribution.key / distribution.cer）")
     ap.add_argument("--force", action="store_true", help="setup 时强制重新生成")
     ap.add_argument("--yes", "-y", action="store_true", help="release 时跳过确认")
-    ap.add_argument("--dry-run", action="store_true", help="secrets 时只打印不写入")
+    ap.add_argument("--dry-run", action="store_true", help="secrets / deps 时只打印不执行")
+    ap.add_argument("--install-optional", action="store_true",
+                    help="deps 时连可选的 Pillow 一起装")
     ap.add_argument("--feedback-email", default="noreply@example.com")
     args = ap.parse_args()
+
+    # ---------- deps：查/装依赖，不碰项目配置
+    if args.action == "deps":
+        return cmd_deps(args)
 
     # ---------- init：只生成样板配置，不动任何东西
     if args.action == "init":
@@ -762,7 +907,21 @@ def main():
 
     # ---------- 统一加载配置：命令行 > ship.config.json > project.yml 推断
     cfg = sc.load(IOS_DIR, {"bundleId": args.bundle_id, "profileName": args.profile})
-    missing = sc.validate(cfg)
+
+    # 每个命令真正需要什么，就只校验什么。
+    #   doctor / release / status 要认工程：bundleId + scheme 都得有
+    #   setup 只要能建 Bundle ID 就行，scheme 只是用来生成描述文件名，
+    #         没有 project.yml 时用 --profile 或者让 apple-auto 自己推
+    #   secrets 只读 secrets.txt，什么配置都不需要
+    # 之前一律按 doctor 的标准拦，导致空目录里 `setup` 报「缺 scheme」，
+    # 和「setup 不需要 project.yml」的说法自相矛盾。
+    if args.action in ("doctor", "release", "status"):
+        missing = sc.validate(cfg)
+    elif args.action == "setup":
+        missing = [] if cfg.get("bundleId") else ["bundleId"]
+    else:
+        missing = []
+
     if missing:
         print(f"\n{C.R}缺关键配置：{', '.join(missing)}{C.X}\n")
         print("  两种补法：")
@@ -773,8 +932,8 @@ def main():
         return 1
 
     # 回填，后面所有函数直接用
-    args.bundle_id = cfg["bundleId"]
-    args.profile = cfg["profileName"]
+    args.bundle_id = cfg.get("bundleId") or ""
+    args.profile = cfg.get("profileName") or ""
     args.cfg = cfg
 
     if args.action == "doctor":

@@ -1,0 +1,38 @@
+# 这个文件是 ios-ship 模板的一部分，会被复制到你的 iOS 项目里。
+# 它挡的是**签名材料**——这些东西一旦进了 Git，就等于进了公开仓库。
+
+# ---- 签名材料：绝对不要提交 ----
+cert/
+*.p8
+*.p12
+*.cer
+*.key
+*.mobileprovision
+secrets.txt
+
+# ---- 构建产物 ----
+build/
+*.xcarchive
+*.ipa
+DerivedData/
+export/
+# XcodeGen 生成的工程不入库，好处是 project.yml 可读可 diff，
+# 在 Windows 上也能直接改。如果你不用 XcodeGen，把这几行删掉。
+*.xcodeproj/
+*.xcworkspace/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp

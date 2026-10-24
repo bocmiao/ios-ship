@@ -209,8 +209,15 @@ def test_tools_smoke():
     r = subprocess.run([sys.executable, str(HERE / "ship.py"), "--help"],
                        capture_output=True, text=True)
     eq(r.returncode, 0, "ship.py --help 退出码 0")
-    for action in ("doctor", "setup", "secrets", "release", "status", "init"):
+    for action in ("doctor", "setup", "secrets", "release", "status", "init", "deps"):
         check(action in r.stdout, f"帮助里列出 {action}")
+
+    # deps 必须能在任何目录跑（它不依赖 project.yml），而且 --dry-run 不能真的装包
+    r = subprocess.run([sys.executable, str(HERE / "ship.py"), "deps", "--dry-run"],
+                       capture_output=True, text=True, cwd=str(HERE))
+    eq(r.returncode, 0, "deps --dry-run 退出码 0")
+    check("cryptography" in r.stdout, "deps 列出了 cryptography")
+    check("Traceback" not in r.stdout, "deps 没有抛异常")
 
     r = subprocess.run([sys.executable, str(HERE / "testflight.py"), "--help"],
                        capture_output=True, text=True)
@@ -290,6 +297,79 @@ def test_jwt_shape():
         base64.urlsafe_b64encode(b"\x00" * 64))) == 64, "ES256 签名为 64 字节定长")
 
 
+def test_sensitive_paths():
+    section("凭据误提交检测")
+
+    # ship.py 顶层会读 argparse，只能按路径加载它的纯函数。
+    # 这里用 exec 只取需要的几个名字，避免 import 副作用。
+    src = (HERE / "ship.py").read_text(encoding="utf-8")
+    ns = {}
+    for name in ("SENSITIVE_SUFFIX", "SENSITIVE_NAME", "is_sensitive_path"):
+        start = src.index(name + " =") if name.isupper() else src.index("def " + name)
+        if name.isupper():
+            block = src[start:src.index("\n\n", start)]
+        else:
+            block = src[start:src.index("\n\n\ndef ", start)]
+        exec(block, ns)
+
+    is_s = ns["is_sensitive_path"]
+
+    must_flag = [
+        "cert/distribution.p12",
+        "ios/tools/cert/AuthKey_AB12CD34EF.p8",
+        "AuthKey_ABCD123456.p8",
+        "cert/secrets.txt",
+        "cert/distribution.key",
+        "Profile.mobileprovision",
+        "AppleWWDRCA.cer",
+    ]
+    must_pass = [
+        "App/ContentView.swift",
+        "tools/ship.py",
+        "README.md",
+        "template/.gitignore",
+        "docs/pitfalls.md",
+        # 名字里带 cert 但不是签名材料，别误报
+        "docs/cert-guide.md",
+        "App/Certificate.swift",
+    ]
+
+    for p in must_flag:
+        check(is_s(p), f"应该识别为凭据：{p}")
+    for p in must_pass:
+        check(not is_s(p), f"不应该误报：{p}")
+
+
+def test_tracked_secrets():
+    section("git 跟踪检查")
+
+    import subprocess
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # 不是 git 仓库时返回 None，doctor 要据此降级而不是报错
+        r = subprocess.run(["git", "ls-files"], cwd=str(td),
+                           capture_output=True, text=True)
+        check(r.returncode != 0, "临时目录本来不是 git 仓库")
+
+        subprocess.run(["git", "init", "-q"], cwd=str(td), check=True)
+        (td / "cert").mkdir()
+        (td / "cert" / "secrets.txt").write_text("X=1\n", encoding="utf-8")
+        (td / "App.swift").write_text("import SwiftUI\n", encoding="utf-8")
+        subprocess.run(["git", "add", "App.swift"], cwd=str(td), check=True)
+
+        files = subprocess.run(["git", "ls-files"], cwd=str(td),
+                               capture_output=True, text=True).stdout.splitlines()
+        eq(files, ["App.swift"], "只暂存了源码，敏感文件没进索引")
+
+        # 故意把 cert/ 加进去，模拟「忘了 .gitignore」的后果
+        subprocess.run(["git", "add", "-f", "cert/secrets.txt"], cwd=str(td), check=True)
+        files = subprocess.run(["git", "ls-files"], cwd=str(td),
+                               capture_output=True, text=True).stdout.splitlines()
+        check(any(f.endswith("secrets.txt") for f in files),
+              "强制加入后能被 ls-files 看到（这就是 doctor 要拦的情况）")
+
+
 def test_version_bump():
     section("build 号递增")
 
@@ -354,6 +434,8 @@ def main():
         test_jwt_shape,
         test_version_bump,
         test_secrets_parsing,
+        test_sensitive_paths,
+        test_tracked_secrets,
     ]
 
     for t in tests:

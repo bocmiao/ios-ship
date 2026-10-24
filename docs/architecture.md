@@ -43,7 +43,15 @@
 | 做成 Python 包发 PyPI | 用户只想 `cp -r tools/`，不想装包、不想管虚拟环境 |
 | **一个入口 + 三个旁路** | 每个脚本能单独跑（`python apple-auto.py` 本身就是可用工具），入口只负责串起来 |
 
-**零第三方依赖**是硬约束：只用标准库。原因是在 Windows 上让一个新手装 Python 已经够难了，再加一句 `pip install -r requirements.txt` 会多出一整类失败（网络、代理、pip 版本、venv 忘了激活）。`ship.cmd` 因此能直接双击跑。
+**依赖只有两个，而且都可控**：`cryptography`（必需，生成 CSR 和签 ES256 JWT）和 `Pillow`（可选，只给 `make-icon.py` 画图）。没有 `requirements.txt`、没有 venv、没有 `pyjwt`/`requests`/`PyYAML`。
+
+理由：在 Windows 上让一个新手装 Python 已经够难了，再加一句 `pip install -r requirements.txt` 会多出一整类失败（网络、代理、pip 版本、venv 忘了激活）。所以：
+
+- 能用标准库解决的一律用标准库 —— 包括手搓 PTP 容器、手搓 JWT、用正则读 `project.yml` 而不是引入 PyYAML
+- 真正绕不过去的只有一件事：EC 私钥、CSR、PKCS#12 这些密码学操作，标准库没有。`cryptography` 是这里的唯一选择
+- 依赖检查放在 `ship.py deps` 里，清单写在代码的 `DEPS` 常量而不是文档里（文档会过期，代码不会）
+
+`init` 和 `secrets` 是纯标准库，即使 `cryptography` 没装也能跑。`ship.cmd` 因此能直接双击，不需要先激活任何环境。
 
 唯一需要外部程序的地方：`openssl`（合成 p12）和 `gh`（GitHub 操作）。前者的替代品是 Python `cryptography`，但**那一版就是我踩坑 1 的源头**（AES-256 + SHA256 MAC），所以宁可调用 openssl 并显式传 `-certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1`。
 
