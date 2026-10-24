@@ -1,0 +1,76 @@
+# XcodeGen 工程描述
+#
+# 为什么不用 .xcodeproj：那是个几千行的 pbxproj，手写必错，而且 Windows 上
+# 没有 Xcode 打不开、改不了。这里用一份可读的 YAML 描述工程，CI 里跑
+# `xcodegen generate` 生成 .xcodeproj。
+#
+# ⚠️ 用之前把下面三处换成你自己的：
+#   1. options.bundleIdPrefix  +  settings 里的 PRODUCT_BUNDLE_IDENTIFIER
+#   2. targets 下的 target 名（MyApp）—— 这个名字会成为 scheme 名
+#   3. info.properties 里的 CFBundleDisplayName（桌面图标下面显示的字）
+
+name: MyApp
+
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  MyApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+        excludes:
+          # Info.plist 由下面的 info 段生成，不能再当资源打进去
+          - "Info.plist"
+
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: MyApp
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 如果 App 不联网，保持 false 可以免去每次上传时的出口合规问答
+        ITSAppUsesNonExemptEncryption: false
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.myapp
+        # 必须和 App Store Connect 里建的版本对上。
+        # 包里写 0.1.0、ASC 里是 1.0，上传会报
+        # 409 ENTITY_ERROR.RELATIONSHIP.INVALID.INVALID_STATE（buildUpload）
+        MARKETING_VERSION: "1.0"
+        # 每次上传都要是没用过的号，而且上传不可撤销、占掉的号拿不回来。
+        # 发新包前在这里 +1，或者直接跑 `python tools/ship.py release` 让它自动加。
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_STYLE: Manual
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        # 没有这一行，asset catalog 里的 AppIcon 不会被编译进包，
+        # Info.plist 就不会有 CFBundleIconName，上传时 Apple 直接拒收：
+        #   Missing Info.plist value: 'CFBundleIconName' (90713)
+        #   Missing required icon file 120x120 (90022)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+# 显式声明 scheme。不写的话 XcodeGen 也会推断，但 workflow 里
+# archive 用的 -scheme 必须对得上，写出来省得猜。
+schemes:
+  MyApp:
+    build:
+      targets:
+        MyApp: all
+    run:
+      config: Debug
+    archive:
+      config: Release

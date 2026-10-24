@@ -1,0 +1,89 @@
+name: 工程校验（免签名）
+
+# 这条流水线不需要任何证书、描述文件、API Key，也不消耗 build 号。
+# 它只回答四个问题：
+#   1. project.yml 能不能生成出有效的 Xcode 工程？
+#   2. Swift 代码能不能编译通过？
+#   3. fastlane 在当前 Ruby 版本下能不能加载？
+#   4. tools/ 里的 Python 脚本有没有语法错误？
+#
+# 关键在编译那步的 CODE_SIGNING_ALLOWED=NO —— 跳过签名就不用等 Secrets 配好。
+# 这样代码问题能立刻发现，不会和签名问题混在一起排查。
+#
+# 日常提交走这条，发版才手动跑 ios.yml。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'project.yml'
+      - 'App/**'
+      - 'Gemfile'
+      - 'fastlane/**'
+      - 'tools/**'
+      - '.github/workflows/validate.yml'
+
+jobs:
+  validate:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    # 和 ios.yml 保持一致的四个值。改项目时两边都要改。
+    env:
+      PROJECT: MyApp
+      SCHEME: MyApp
+      APP_NAME: MyApp
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 环境
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+
+      - name: 装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 从 project.yml 生成工程
+        run: |
+          set -euo pipefail
+          xcodegen generate
+          # 生成完立刻列一遍。scheme 名对不上是这里最常见的失败，
+          # 与其等后面报一句含混的错，不如现在就看清楚。
+          xcodebuild -list -project "$PROJECT.xcodeproj"
+
+      - name: 编译（不签名）
+        run: |
+          set -euo pipefail
+          # 不接 xcbeautify：它不在 runner 上，装了还要多等一次 brew。
+          # 而且管道会把 xcodebuild 的退出码吞掉，失败反而看不出来。
+          xcodebuild build \
+            -project "$PROJECT.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: 产物在哪
+        if: always()
+        run: |
+          find build -name "$APP_NAME.app" -maxdepth 6 2>/dev/null || echo "没找到 .app（如果上一步失败，这是正常的）"
+
+      - name: fastlane 能否加载
+        run: |
+          set -euo pipefail
+          gem install bundler --no-document
+          bundle install --quiet
+          bundle exec fastlane --version
+
+      - name: tools 里的 Python 脚本语法自检
+        run: |
+          set -euo pipefail
+          # 这一步不联网、不调 API，纯粹挡语法错误。
+          # compileall 会在 tools/ 下生成 __pycache__，.gitignore 里已经排掉了。
+          python3 -m compileall -q tools/ && echo "tools/ 语法检查通过"

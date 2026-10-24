@@ -1,0 +1,11 @@
+# 默认统一成 LF，避免 Windows/Linux 混着提交时整文件 diff
+* text=auto eol=lf
+
+# 批处理必须是 CRLF，而且必须是纯 ASCII。
+# cmd.exe 按 OEM 代码页（中文 Windows 上是 GBK）读 .cmd，
+# UTF-8 中文会被切成碎片当成命令执行；LF-only 会让 goto 定位出错。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 图标是二进制，别让 git 试着做换行转换
+*.png binary

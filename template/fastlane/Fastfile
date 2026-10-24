@@ -1,0 +1,31 @@
+default_platform(:ios)
+
+# 这里只做一件事：上传。
+# 编译和签名交给 workflow 里的 xcodebuild——因为那两个环节出错时，
+# xcodebuild 的日志比 gym 的日志更容易定位到具体哪一步。
+platform :ios do
+  desc "把已导出的 ipa 上传到 TestFlight"
+  lane :upload do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_KEY_CONTENT"),
+      is_key_content_base64: true,
+      duration: 1200,
+      in_house: false
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: ENV.fetch("IPA_PATH"),
+      # 不等苹果处理完就返回。所以「上传成功」只代表二进制交上去了，
+      # 不代表 TestFlight 里能装 —— 还要等 processingState 变 VALID，
+      # 再把 build 挂进内部测试组。那两步用 `python tools/ship.py status` 看。
+      skip_waiting_for_build_processing: true,
+      skip_submission: true,
+      # TestFlight App 里显示的「本次测试内容」。可以用环境变量覆盖，
+      # 比如在 workflow 里传 CHANGELOG="修了首页崩溃"。
+      changelog: ENV.fetch("CHANGELOG", "Build #{ENV.fetch('GITHUB_RUN_NUMBER', 'local')}")
+    )
+  end
+end

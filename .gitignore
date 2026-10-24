@@ -1,0 +1,36 @@
+# ---- 签名材料：绝对不要提交 ----
+cert/
+*.p8
+*.p12
+*.cer
+*.key
+*.mobileprovision
+secrets.txt
+
+# ---- 构建产物 ----
+build/
+*.xcarchive
+*.ipa
+DerivedData/
+export/
+*.xcodeproj/
+*.xcworkspace/
+
+# 注意：.xcodeproj 是 XcodeGen 生成的产物，不入库。
+# 好处是工程配置可读、可 diff，在 Windows 上也能直接改 project.yml。
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp
