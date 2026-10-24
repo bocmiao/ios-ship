@@ -47,6 +47,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -157,6 +158,45 @@ def ensure_internal_group(aa, token, app_id):
     return g["id"], g["attributes"]["name"]
 
 
+def wait_for_build(aa, token, app_id, want=None, timeout=900, interval=15):
+    """等 build 出现在列表里并变成 VALID，返回那条 build。
+
+    Fastfile 里 skip_waiting_for_build_processing: true，所以 workflow 在
+    Apple 收完二进制的那一刻就成功了。此时 /v1/builds 往往还查不到这个号，
+    或者状态是 PROCESSING。直接去挂组会 sys.exit，把一次成功的发版报成失败。
+
+    want 是版本号字符串；None 表示等最新的一个变成 VALID。
+    """
+    deadline = time.time() + timeout
+    last = None
+    while True:
+        builds = list_builds(aa, token, app_id, limit=10)
+        target = None
+        for b in builds:
+            if want and b["attributes"]["version"] == str(want):
+                target = b
+                break
+        if want is None:
+            target = next((b for b in builds
+                           if b["attributes"]["processingState"] == "VALID"), None)
+
+        if target:
+            ps = target["attributes"]["processingState"]
+            if ps == "VALID":
+                return target
+            if ps in ("INVALID", "FAILED"):
+                sys.exit(f"build {target['attributes']['version']} 处理失败：{ps}\n"
+                         f"原因多半是图标缺失或 Info.plist 有问题，"
+                         f"Apple 会给账号发一封说明邮件。")
+            last = ps
+        if time.time() >= deadline:
+            sys.exit(f"等了 {timeout // 60} 分钟，build {want or '(最新)'} 仍未到 VALID"
+                     f"（当前 {last or '列表里还没有'}）。\n"
+                     f"过几分钟用 `testflight.py attach --build N` 补挂即可。")
+        print(f"  等待 Apple 处理（{last or '尚未出现在 build 列表'}）…")
+        time.sleep(interval)
+
+
 def ensure_build_attached(aa, token, group_id, app_id, want=None):
     """把 build 挂到组里。want 是版本号字符串，None 表示最新的 VALID。"""
     builds = list_builds(aa, token, app_id, limit=10)
@@ -188,18 +228,12 @@ def ensure_build_attached(aa, token, group_id, app_id, want=None):
 def ensure_self_in_group(aa, token, group_id):
     """把 Account Holder 加成内部测试员。
 
-    内部测试员 = 团队成员。先看组里有没有人，没有就从 /v1/users 里
-    挑 Account Holder 建一条。
+    内部测试员 = 团队成员。判定标准是「组里有没有**你自己**」，不是「组里有没有人」——
+    组里已经有同事时，"有人"成立但你这台手机依然装不上。
 
     坑：POST /v1/betaTesters 必须同时带 betaGroups 或 builds 关系，
     只传 email 会报 "Either betaGroups or builds relationship is required"。
     """
-    _, _, testers = group_detail(aa, token, group_id)
-    if testers:
-        emails = [t["attributes"].get("email") for t in testers]
-        print(f"  组内已有测试员：{emails}")
-        return
-
     st, r = aa.api("GET", "/v1/users?limit=20", token)
     if st >= 300:
         print(f"  查团队成员失败（{aa.api_err(r)}），跳过加测试员")
@@ -214,10 +248,20 @@ def ensure_self_in_group(aa, token, group_id):
         return
 
     a = holder["attributes"]
+    my_email = a.get("username")
+
+    _, _, testers = group_detail(aa, token, group_id)
+    emails = [t["attributes"].get("email") for t in testers if t["attributes"].get("email")]
+    if my_email and my_email in emails:
+        print(f"  组内已有你（{my_email}）")
+        return
+    if emails:
+        print(f"  组内有 {len(emails)} 个测试员但没有你（{my_email}），补上")
+
     body = {"data": {
         "type": "betaTesters",
         "attributes": {
-            "email": a.get("username"),
+            "email": my_email,
             "firstName": a.get("firstName") or "Test",
             "lastName": a.get("lastName") or "User",
         },
@@ -227,15 +271,19 @@ def ensure_self_in_group(aa, token, group_id):
     if st >= 300:
         print(f"  加测试员失败：{aa.api_err(r)}")
         return
-    print(f"  已把 {a.get('username')} 加进内部组")
+    print(f"  已把 {my_email} 加进内部组")
 
 
-def ensure_localizations(aa, token, app_id, build_id, feedback_email):
+def ensure_localizations(aa, token, app_id, build_id, feedback_email,
+                         description=None, whats_new=None):
     """补 TestFlight 里显示的两段文字。
 
     没有这些，TestFlight 里 App 详情是空白的 —— 不影响安装，但看不到该测什么。
     locale 必须用 App Store 的语言代码：简体中文是 `zh-Hans`，
     写 `zh` 会报 `The 'locale' value is invalid`。
+
+    description / whats_new 由调用方传（ship.config.json 的 testflightDescription
+    与 testflightWhatsNew）。不传就用通用文案——这里绝不能写死某个项目的业务描述。
     """
     st, r = aa.api("GET", f"/v1/betaAppLocalizations?filter[app]={app_id}", token)
     if st < 300 and not r.get("data"):
@@ -243,7 +291,7 @@ def ensure_localizations(aa, token, app_id, build_id, feedback_email):
             "type": "betaAppLocalizations",
             "attributes": {
                 "locale": "zh-Hans",
-                "description": "把相机画面接到手机上的取景辅助工具。",
+                "description": description or "内部测试版本，用于验证构建与安装流程。",
                 "feedbackEmail": feedback_email,
             },
             "relationships": {"app": {"data": {"type": "apps", "id": app_id}}},
@@ -257,7 +305,7 @@ def ensure_localizations(aa, token, app_id, build_id, feedback_email):
             "type": "betaBuildLocalizations",
             "attributes": {
                 "locale": "zh-Hans",
-                "whatsNew": "请把「开始探测」跑完，点右上角「复制」，把报告发回来。",
+                "whatsNew": whats_new or "本次改动见仓库提交记录。",
             },
             "relationships": {"build": {"data": {"type": "builds", "id": build_id}}},
         }}
@@ -308,21 +356,34 @@ def cmd_attach(aa, token, app, args):
     print("1. 内部测试组")
     gid, gname = ensure_internal_group(aa, token, app_id)
 
-    print("2. 挂 build")
-    ver = ensure_build_attached(aa, token, gid, app_id, want=args.build)
+    print("2. 等 Apple 处理 build")
+    target = wait_for_build(aa, token, app_id, want=args.build)
+    ver = target["attributes"]["version"]
 
-    print("3. 测试员")
+    print("3. 挂 build")
+    ensure_build_attached(aa, token, gid, app_id, want=ver)
+
+    print("4. 测试员")
     ensure_self_in_group(aa, token, gid)
 
-    print("4. TestFlight 文案")
-    builds = list_builds(aa, token, app_id, limit=10)
-    bid = next((b["id"] for b in builds
-                if b["attributes"]["version"] == str(ver)), None)
-    if bid:
-        ensure_localizations(aa, token, app_id, bid, args.feedback_email)
+    print("5. TestFlight 文案")
+    # 直接用第 2 步拿到的 build id，不再查一遍列表
+    ensure_localizations(aa, token, app_id, target["id"], args.feedback_email,
+                         args.description, args.whats_new)
 
     print(f"\n完成：build {ver} 已分配给内部组「{gname}」。")
     print("iPhone 打开 TestFlight，用同一个 Apple ID 登录，几分钟内应该能看到。")
+
+
+def load_cfg():
+    """读 shipconfig.load()。读不到就返回空字典，让参数兜底。"""
+    try:
+        spec = importlib.util.spec_from_file_location("sc_for_tf", HERE / "shipconfig.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.load(HERE.parent)
+    except Exception:
+        return {}
 
 
 def main():
@@ -335,22 +396,16 @@ def main():
     p.add_argument("--key-id", default=None)
     p.add_argument("--issuer", default=None)
     p.add_argument("--feedback-email", default=None)
+    p.add_argument("--description", default="", help="TestFlight App 简介，默认取 ship.config.json")
+    p.add_argument("--whats-new", default="", help="本次测试内容，默认取 ship.config.json")
     args = p.parse_args()
 
     aa = load_apple_auto()
     secrets = read_secrets()
+    cfg = load_cfg()
 
-    # bundle id 不传就推断，推断不出来才报错
     if not args.bundle_id:
-        try:
-            import importlib.util
-            spec2 = importlib.util.spec_from_file_location(
-                "sc_for_tf", HERE / "shipconfig.py")
-            sc2 = importlib.util.module_from_spec(spec2)
-            spec2.loader.exec_module(sc2)
-            args.bundle_id = sc2.load(HERE.parent).get("bundleId") or ""
-        except Exception:
-            pass
+        args.bundle_id = cfg.get("bundleId") or ""
     if not args.bundle_id:
         sys.exit("缺 --bundle-id；项目里也没有 project.yml / ship.config.json 可推断。")
 
@@ -365,7 +420,11 @@ def main():
     if not key_id:
         key_id = aa.infer_key_id(p8)
     if not args.feedback_email:
-        args.feedback_email = secrets.get("ASC_FEEDBACK_EMAIL", "noreply@example.com")
+        args.feedback_email = (cfg.get("feedbackEmail")
+                               or secrets.get("ASC_FEEDBACK_EMAIL")
+                               or "noreply@example.com")
+    args.description = args.description or cfg.get("testflightDescription") or ""
+    args.whats_new = args.whats_new or cfg.get("testflightWhatsNew") or ""
 
     token = aa.make_jwt(str(p8), key_id, issuer)
     app = get_app(aa, token, args.bundle_id)

@@ -340,6 +340,31 @@ def test_sensitive_paths():
         check(not is_s(p), f"不应该误报：{p}")
 
 
+def test_generic():
+    section("通用性：没有写死某个项目的业务内容")
+
+    tf_src = (HERE / "testflight.py").read_text(encoding="utf-8")
+
+    # 这几个词来自最初那个相机项目的 TestFlight 文案。模板里不能出现——
+    # 任何人拿它发自己的 App，TestFlight 里都会显示别人的业务描述。
+    for word in ("取景", "开始探测", "A7M4"):
+        check(word not in tf_src, f"testflight.py 不含业务词「{word}」")
+
+    check("def wait_for_build(" in tf_src, "testflight.py 有 wait_for_build")
+    check("def ensure_localizations(aa, token, app_id, build_id, feedback_email," in tf_src,
+          "ensure_localizations 的文案可被覆盖")
+    check("my_email" in tf_src, "加测试员前比对本人邮箱，而不是「组里有没有人」")
+
+    ship_src = (HERE / "ship.py").read_text(encoding="utf-8")
+    check('"add", "-A"' not in ship_src, "release 不把工作区所有改动一起提交")
+    check('"watch"' in ship_src, "等构建用 gh run watch，不手写轮询")
+
+    sc_src = (HERE / "shipconfig.py").read_text(encoding="utf-8")
+    check('"testflightDescription"' in sc_src, "配置里有 testflightDescription")
+    check('"testflightWhatsNew"' in sc_src, "配置里有 testflightWhatsNew")
+    check('"repo"' not in sc_src, "删掉了没人读的 repo 字段")
+
+
 def test_tracked_secrets():
     section("git 跟踪检查")
 
@@ -435,6 +460,7 @@ def main():
         test_version_bump,
         test_secrets_parsing,
         test_sensitive_paths,
+        test_generic,
         test_tracked_secrets,
     ]
 

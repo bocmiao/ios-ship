@@ -32,12 +32,15 @@
   "xcodeDir": "MyApp",
   "teamId": "ABCDE12345",
   "profileName": "MyApp AppStore",
-  "repo": "owner/repo",
-  "feedbackEmail": "you@example.com"
+  "feedbackEmail": "you@example.com",
+  "testflightDescription": "一句话说明这个 App 做什么",
+  "testflightWhatsNew": "本次要测什么"
 }
 ```
 
 `xcodeDir` 是源码目录名（含 Assets.xcassets 的那个），用于找 App 图标。
+`testflightDescription` / `testflightWhatsNew` 是 TestFlight 里显示的两段文字，
+不填就用通用文案，不会写死某个项目的业务描述。
 """
 
 import json
@@ -53,8 +56,9 @@ DEFAULTS = {
     "xcodeDir": None,
     "teamId": None,
     "profileName": None,
-    "repo": None,
     "feedbackEmail": None,
+    "testflightDescription": None,
+    "testflightWhatsNew": None,
 }
 
 # 这些缺了就没法跑
@@ -193,8 +197,9 @@ def write_example(path, ios_dir=None):
         "xcodeDir": "App",
         "teamId": "",
         "profileName": "",
-        "repo": "",
         "feedbackEmail": "",
+        "testflightDescription": "",
+        "testflightWhatsNew": "",
     }
 
     inferred = _infer_from_project_yml(ios_dir)

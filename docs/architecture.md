@@ -152,12 +152,13 @@ secrets.txt（8 个键）
 |---|---|---|
 | `bundleId` | `PRODUCT_BUNDLE_IDENTIFIER` | **必需**，`validate()` 报错 |
 | `scheme` | `schemes:` 下第一个 key，没有就取 `targets:` 下第一个 | **必需** |
-| `xcodeDir` | 同 scheme（放 `Assets.xcassets` 的目录） | 找不到图标 → 上传才炸 90713 |
+| `xcodeDir` | `targets` 下 `sources` 的第一条 `path`（不是 target 名） | 找不到图标 → 上传才炸 90713 |
 | `appName` | `CFBundleDisplayName` | p12 friendly name、证书名用 |
-| `teamId` | `DEVELOPMENT_TEAM` | 证书匹配不到团队 |
+| `teamId` | `DEVELOPMENT_TEAM`，其次 `secrets.txt` 的 `APPLE_TEAM_ID` | 证书匹配不到团队 |
 | `profileName` | 无 | 默认 `<scheme> AppStore` |
-| `repo` | 无（用 `gh repo view`） | release 推不上去 |
-| `feedbackEmail` | 无 | TestFlight 反馈邮箱，有默认值 |
+| `feedbackEmail` | 无 | TestFlight 反馈邮箱，默认 `noreply@example.com` |
+| `testflightDescription` | 无 | TestFlight 里用通用文案 |
+| `testflightWhatsNew` | 无 | 同上 |
 
 **`validate()` 只拦 `bundleId` 和 `scheme`**。其余缺了降级运行并给提示，不阻断 —— 因为 `setup` 和 `secrets` 不需要 `project.yml`，可能有人只想在空目录里先把证书搞定。
 
@@ -172,7 +173,7 @@ ship.py release
   │
   ├─2─ project.yml: CURRENT_PROJECT_VERSION 4 → 5     ← 写盘
   │
-  ├─3─ git commit + push                              ← 不可逆，但可 revert
+  ├─3─ git add project.yml + commit + push             ← 只提交版本号，工作区其他改动不动
   │
   ├─4─ gh workflow run ios.yml                        ← GitHub 侧开始
   │        │
@@ -183,18 +184,18 @@ ship.py release
   │        │   │ 4. xcodebuild archive  (XcodeGen 生成工程) │
   │        │   │ 5. xcodebuild -exportArchive              │
   │        │   │      method = app-store-connect           │
-  │        │   │ 6. xcrun altool --upload-app              │
+  │        │   │ 6. fastlane upload_to_testflight          │
   │        │   │ 7. 删 keychain、删临时文件                 │
   │        │   └───────────────────────────────────────────┘
   │        │              ↓ 二进制进苹果
-  ├─5─ 轮询 gh run view（每 10s，最多 15 分钟）        ← 这一步只代表「CI 跑完了」
+  ├─5─ gh run watch --exit-status                      ← 这一步只代表「CI 跑完了」
   │
-  ├─6─ 查 /v1/builds 找最新 build，等 processingState = VALID
-  │                                                     ← 这一步才代表「苹果收下了」
-  └─7─ testflight.py attach                            ← 这一步才代表「手机能装了」
+  ├─6─ wait_for_build(): 查 /v1/builds 到 VALID         ← 这一步才代表「苹果收下了」
+  │
+  └─7─ attach: 内部组 + 挂 build + 加自己 + 文案         ← 这一步才代表「手机能装了」
 ```
 
-**关键在于三个判断点被分开了。** 把它们合成一个「成功/失败」是坑 13 的成因：CI 绿了不等于 VALID，VALID 不等于能装。
+**关键在于四个判断点被分开了。** 把它们合成一个「成功/失败」是坑 13 的成因：CI 绿了不等于 VALID，VALID 不等于能装，组里有人也不等于是你。
 
 `doctor` 也有类似的分层，7 组按「从本地到云端」排，靠前的组挂了就不必看后面的：
 

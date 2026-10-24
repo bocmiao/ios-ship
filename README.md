@@ -82,10 +82,12 @@ python tools/ship.py init
 ```
 OK   已生成 ios/ship.config.json
      已从 project.yml 自动填好：scheme, xcodeDir, bundleId, appName
-     还空着的要手填：teamId、repo、feedbackEmail
+     其余字段可留空：teamId 从 secrets.txt 兜底，TestFlight 文案有通用默认值
 ```
 
-补齐 `teamId`（开发者账号页面右上角 10 位编号）与 `repo`。
+`teamId` 留空时由 `secrets.txt` 的 `APPLE_TEAM_ID` 兜底；手填的话是开发者账号页面右上角的 10 位编号。
+
+TestFlight 里显示的两段文字可以用 `testflightDescription`（App 简介）和 `testflightWhatsNew`（本次测什么）覆盖，不填走通用文案。
 
 ### 4. 运行体检
 
@@ -158,9 +160,11 @@ python tools/ship.py secrets
 python tools/ship.py release
 ```
 
-顺序为 build 号加一、提交推送、触发云端构建、等待结果、把 build 加入内部测试组。
+顺序为 build 号加一、提交 `project.yml` 并推送、触发云端构建、等待构建结束、等 Apple 处理完 build、加入内部测试组。
 
-该命令消耗一个 build 号，上传不可撤销，执行前要求确认一次。单次耗时约 4 分钟。
+提交范围只有 `project.yml`。工作区里其他改动不会被带进这次提交，会提示留在原处。
+
+该命令消耗一个 build 号，上传不可撤销，执行前要求确认一次。构建本身实测 3 分 45 秒，之后还要等 Apple 把 build 处理到 `VALID` 才能挂进组。
 
 ### 9. 安装
 
@@ -365,7 +369,7 @@ cmd.exe 按 OEM 代码页解码输出。`ship.cmd` 内部执行 `chcp 65001`；�
 | `ship.py status` | 查询分发状态 | 只读 |
 | `testflight.py attach` | 单独加入 build、添加测试员、补 TestFlight 文案 | 写 App Store Connect |
 | `make-icon.py` | 生成图标与 asset catalog | 写文件 |
-| `selftest.py` | 78 条离线断言 | 只读 |
+| `selftest.py` | 89 条离线断言 | 只读 |
 
 `setup` 参数：
 

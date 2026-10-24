@@ -670,15 +670,25 @@ def cmd_release(args):
     ok(f"build 号 {old} → {new}")
 
     # 2. 提交推送
-    gst = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                         text=True, errors="replace", cwd=str(IOS_DIR))
-    changes = [x for x in gst.stdout.splitlines() if x.strip()]
-    if changes:
-        subprocess.run(["git", "add", "-A"], cwd=str(IOS_DIR))
+    # 只提交 project.yml。发版时工作区里常有改了一半的代码，
+    # `git add -A` 会把它一起塞进 release 提交推上去，事后很难拆开。
+    st_yml = subprocess.run(["git", "status", "--porcelain", "project.yml"],
+                            capture_output=True, text=True, errors="replace", cwd=str(IOS_DIR))
+    if st_yml.stdout.strip():
+        subprocess.run(["git", "add", "project.yml"], cwd=str(IOS_DIR))
         subprocess.run(["git", "commit", "-m", f"release: build {new}"], cwd=str(IOS_DIR))
-        ok(f"已提交（{len(changes)} 个文件变更）")
+        ok("已提交 project.yml")
     else:
-        note("没有文件变更，直接推送当前 HEAD")
+        note("project.yml 没有改动，直接推送当前 HEAD")
+
+    st_all = subprocess.run(["git", "status", "--porcelain"],
+                            capture_output=True, text=True, errors="replace", cwd=str(IOS_DIR))
+    others = [x for x in st_all.stdout.splitlines()
+              if x.strip() and "project.yml" not in x]
+    if others:
+        warn(f"工作区还有 {len(others)} 个文件没提交",
+             "本次只提交 project.yml，这些留在工作区，不影响构建")
+
     r = subprocess.run(["git", "push", "origin", "HEAD"], capture_output=True,
                        text=True, errors="replace", cwd=str(IOS_DIR))
     if r.returncode != 0:
@@ -686,14 +696,14 @@ def cmd_release(args):
         return 1
     ok("已推送")
 
-    # 3. 触发（ios.yml 已改成只手动触发，push 不会自动上传）
+    # 3. 触发（ios.yml 只手动触发，push 不会自动上传）
     rc, out, err = gh("workflow", "run", "ios.yml", "--ref", "main")
     if rc != 0:
         bad("触发流水线失败", err.strip()[:200])
         return 1
     ok("流水线已触发")
 
-    # 等 run 出现
+    # 等 run 出现在列表里（刚触发时还没编号，通常 3–10 秒）
     run_id = None
     for _ in range(20):
         time.sleep(3)
@@ -708,44 +718,31 @@ def cmd_release(args):
     if not run_id:
         warn("没拿到 run id，去网页看进度", "Actions → iOS 构建并上传 TestFlight")
         return 1
-    note(f"run {run_id}（约 4 分钟）")
 
-    # 4. 等结果
-    print(f"\n{C.D}构建中", end="", flush=True)
-    conclusion = None
-    for _ in range(120):
-        time.sleep(15)
-        rc, out, _ = gh("run", "view", str(run_id), "--json", "status,conclusion")
-        if rc != 0:
-            print(".", end="", flush=True)
-            continue
-        try:
-            d = json.loads(out)
-        except Exception:
-            continue
-        if d.get("status") == "completed":
-            conclusion = d.get("conclusion")
-            break
-        print(".", end="", flush=True)
-    print(C.X)
-
-    if conclusion != "success":
-        bad(f"构建失败：{conclusion}")
+    # 4. 等结果：交给 gh 自己盯，--exit-status 把结论变成退出码
+    note(f"run {run_id}，约 4 分钟")
+    print()
+    wr = subprocess.run(["gh", "run", "watch", str(run_id), "--exit-status", "--interval", "15"],
+                        cwd=str(IOS_DIR))
+    if wr.returncode != 0:
+        bad("构建失败或被取消")
         note(f"看日志：gh run view {run_id} --log-failed")
         return 1
     ok("构建并上传成功")
 
-    # 5. 挂进内部测试组——这一步漏了，TestFlight 里就是空的
+    # 5. 挂进内部测试组
+    # upload 用的是 skip_waiting_for_build_processing，workflow 成功的那一刻
+    # Apple 那边往往还在处理。先等到 VALID 再挂，否则会把成功报成失败。
     print()
     h("分发")
     gid, gname = tf.ensure_internal_group(aa, token, app["id"])
-    ver = tf.ensure_build_attached(aa, token, gid, app["id"])
+    target = tf.wait_for_build(aa, token, app["id"], want=new)
+    ver = target["attributes"]["version"]
+    tf.ensure_build_attached(aa, token, gid, app["id"], want=ver)
     tf.ensure_self_in_group(aa, token, gid)
-
-    builds = tf.list_builds(aa, token, app["id"], limit=10)
-    bid = next((b["id"] for b in builds if b["attributes"]["version"] == str(ver)), None)
-    if bid:
-        tf.ensure_localizations(aa, token, app["id"], bid, args.feedback_email)
+    tf.ensure_localizations(aa, token, app["id"], target["id"], args.feedback_email,
+                            args.cfg.get("testflightDescription"),
+                            args.cfg.get("testflightWhatsNew"))
 
     print(f"\n{C.G}完成。{C.X} build {ver} 已进入内部组「{gname}」。")
     print("iPhone 打开 TestFlight 就能装，通常几分钟内可见。")
@@ -865,7 +862,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="secrets / deps 时只打印不执行")
     ap.add_argument("--install-optional", action="store_true",
                     help="deps 时连可选的 Pillow 一起装")
-    ap.add_argument("--feedback-email", default="noreply@example.com")
+    ap.add_argument("--feedback-email", default="",
+                    help="TestFlight 反馈邮箱，默认取 ship.config.json 或 noreply@example.com")
     args = ap.parse_args()
 
     # ---------- deps：查/装依赖，不碰项目配置
@@ -882,7 +880,7 @@ def main():
         ok(f"已生成 {target}")
         if filled:
             note(f"已从 project.yml 自动填好：{', '.join(filled)}")
-        note("还空着的要手填：teamId、repo、feedbackEmail")
+        note("其余字段可留空：teamId 从 secrets.txt 兜底，TestFlight 文案有通用默认值")
         note("改完跑 `ship.py doctor` 看还缺什么")
         return 0
 
@@ -935,6 +933,8 @@ def main():
     args.bundle_id = cfg.get("bundleId") or ""
     args.profile = cfg.get("profileName") or ""
     args.cfg = cfg
+    args.feedback_email = (args.feedback_email or cfg.get("feedbackEmail")
+                           or "noreply@example.com")
 
     if args.action == "doctor":
         return cmd_doctor(args)
