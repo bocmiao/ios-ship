@@ -208,6 +208,32 @@ CI 除了在 Python 3.9 / 3.12 下各跑一遍，还有一步是**按 README 的
 
 ---
 
+## 验证到什么程度
+
+写清楚哪些是真跑过的，哪些没有——省得你踩到一个我没踩过的坑还以为是我的锅。
+
+**跑通过**（在一个真实的相机辅助 App 项目上，Windows 11 + `macos-latest`）：
+
+- `doctor` 七组检查，包括团队已有 2 张证书时的名额提示
+- `setup` 完整证书链：EC 私钥 → CSR → `POST /v1/certificates` → p12 → Bundle ID → `POST /v1/profiles`
+- 生成 p12 在 macOS runner 上被 `security import` 接受（3DES + SHA1）
+- `secrets` 写 8 个键进 GitHub
+- 云端 Archive → 导出 IPA → 上传 TestFlight，`processingState` 到 `VALID`
+- `testflight.py attach` 建内部组、挂 build、加测试员、补 `zh-Hans` 文案，手机上装上了
+- 图标生成后过了苹果的 90713 / 90022 检查
+
+**没跑通过**：
+
+- `ship.py release` 的**全自动**版本。它要消耗一个 build 号，而上传不可撤销。实际发版时我是分步走的：手动 `gh workflow run` → 等 VALID → `testflight.py attach`。`release` 把这三步按顺序封装了（代码路径都有单测覆盖，但没做过一次真实的全链路）。
+- `--reuse-cert` 的**跨项目**复用。我验证过公钥比对逻辑（私钥和证书不配对时确实会被拒），但我只有一个项目需要签，没真的拿 A 项目的证书去签 B 项目。
+- Linux 下的 `ship.cmd`（它只对 Windows 有意义）、以及脚本在 macOS 本机上的表现。
+
+**几个数字是抄文档的，不是我测的**：TestFlight build 有效期 90 天、内部测试员上限 100 人、私有仓库 200 分钟/月。
+
+证书上限 2 张也是官方口径——但我确实在自己团队上查到**正好占了 2 张**（到 2027-09 和 2027-10），所以决定第二个项目不再申请、改为复用。`doctor` 里那条提示就是这么来的。我没有真的去撞一次「第三张被拒」，因为不想把名额浪费在验证这件事上。
+
+---
+
 ## 适用边界
 
 **能做**：SwiftUI / UIKit / Objective-C 原生工程，或任何最终产出 `.xcodeproj` 的项目（Flutter、React Native、Capacitor 加了 ios 目录之后同理）。
