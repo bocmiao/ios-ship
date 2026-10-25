@@ -530,6 +530,41 @@ def test_secrets_parsing():
 
 # ------------------------------------------------------------------ 入口
 
+def test_logs_parsing():
+    section("失败日志过滤")
+
+    import ship as sh
+
+    # gh --log-failed 的真实行格式：job \t step \t 时间戳 内容
+    raw = (
+        "build\t上传到 TestFlight\t2026-10-24T02:22:54.0950000Z [altool] status : 409\n"
+        "build\t上传到 TestFlight\t2026-10-24T02:22:54.0960000Z \x1b[0m\n"
+        "build\t上传到 TestFlight\t2026-10-24T02:22:54.0970000Z "
+        "\x1b[31mThe bundle version must be higher\x1b[0m\n"
+        "build\t上传到 TestFlight\t2026-10-24T02:22:54.0980000Z "
+        "^[[33mliteral escape^[[0m\n"
+        "build\tArchive\t2026-10-24T02:20:00.0000000Z error: no such module\n"
+    )
+    rows = sh._parse_run_log(raw)
+
+    eq(len(rows), 4, "只有颜色码没有内容的行被丢掉")
+    eq(rows[0][1], "上传到 TestFlight", "步骤名解析正确")
+    eq(rows[0][2], "[altool] status : 409", "ISO 时间戳被剥掉")
+    check("\x1b" not in rows[1][2], "真实 ESC 码被剥掉")
+    check("^[" not in rows[2][2], "字面 ^[ 转义序列也被剥掉")
+    eq(rows[2][2], "literal escape", "字面转义剥完只剩正文")
+    eq(rows[3][1], "Archive", "不同步骤能区分开")
+
+    # 命中表要覆盖上传阶段最常见的几种，否则这条命令等于没过滤
+    sigs = [s for s, _ in sh.LOG_HINTS]
+    for must in ("90713", "90022", "bundle version must be higher",
+                 "MAC verification failed", "No profiles for"):
+        check(must in sigs, f"命中表包含 {must}")
+
+    # 每条提示都得能落到 docs/pitfalls.md 或 README 的某一条上，不能凭空写
+    check(all(h.strip() for _s, h in sh.LOG_HINTS), "每条命中都有对应的修法")
+
+
 def main():
     print("ios-ship 离线自测")
     print("=" * 46)
@@ -551,6 +586,7 @@ def main():
         test_new,
         test_generic,
         test_tracked_secrets,
+        test_logs_parsing,
     ]
 
     for t in tests:

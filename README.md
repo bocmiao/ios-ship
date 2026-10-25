@@ -297,6 +297,33 @@ python tools/ship.py secrets
 
 `--reuse-cert` 校验通过后只创建 Bundle ID 和描述文件，不碰证书。
 
+## 已有 Xcode 工程怎么接
+
+模板的工程由 `project.yml` 描述，CI 里跑 `xcodegen generate` 生成 `.xcodeproj`。手上已经有 `.xcodeproj` 的话，要么给它写一份 `project.yml`，要么把源码搬进模板的 `App/` 再改 `project.yml`。后者在工程结构简单时更快。
+
+`.xcodeproj` 里能读出对应关系：
+
+| Xcode 里的 | `project.yml` 里 |
+|---|---|
+| Target 名 | `targets:` 下面的键名 |
+| Product Bundle Identifier | `PRODUCT_BUNDLE_IDENTIFIER` |
+| Deployment Target | `options.deploymentTarget.iOS` |
+| Info.plist 的各个键 | `targets.<名字>.info.properties` |
+| Swift Package 依赖 | `packages:` 加 `dependencies: [{package: ...}]` |
+| Signing & Capabilities | `entitlements:` 段与 `settings.base` |
+| Scheme 名 | 顶层 `schemes:`，archive 步骤按这个名字找 |
+
+4 个值决定工具能不能跑：
+
+- `name:`：同时是工程名和默认 scheme 名。两者不同名时，`schemes:` 里显式声明。
+- `sources[0].path`：工具靠它推断 `xcodeDir`，图标、Info.plist、asset catalog 都在这下面找。
+- `PRODUCT_BUNDLE_IDENTIFIER`：和 App Store Connect 里的 Bundle ID 必须一致。
+- `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`：少了它图标不会编进包，上传时才报 90713。
+
+搬不过来的部分要自己处理：多 target（模板只配了一个）、自定义 build phase、CocoaPods（XcodeGen 支持，但要另写 `preBuildScripts` 跑 `pod install`）、Watch App 与各类扩展（每个各需一份描述文件）。
+
+改完跑 `python tools/ship.py doctor`，它会指出 `xcodeDir` 有没有推断对、图标找没找到。推上去先让 `validate.yml` 跑一次免签名编译，编不过不会消耗 build 号。
+
 ## doctor 输出怎么看
 
 七组检查按本地到云端排列。前面组有阻塞项时，后面组的结果不成立。
@@ -356,7 +383,7 @@ git commit -m "移除误提交的凭据"
 
 **支持 Flutter、React Native、Unity 吗**
 
-只要项目最终产出 `.xcodeproj` 就支持。前提是工程能用 XcodeGen 描述，或自己写 `project.yml` 指向对应 target。
+只要项目最终产出 `.xcodeproj` 就支持，但需要自己写 `project.yml`。Flutter、React Native、Capacitor 的 `ios/` 目录是标准 Xcode 工程，按[已有 Xcode 工程怎么接](#已有-xcode-工程怎么接)那节对照着写。
 
 **App Clip、Watch App、扩展能用吗**
 
@@ -405,6 +432,18 @@ git commit -m "移除误提交的凭据"
 **CI 里私钥怎么使用**
 
 从 secret 解码到 `$RUNNER_TEMP`，导入临时 keychain，任务结束后连同 keychain 一起删除。
+
+## 构建失败了怎么看
+
+```bash
+python tools/ship.py logs
+```
+
+找最近一次失败的 `ios.yml`，只取失败的那个步骤，剥掉时间戳和颜色码，命中已知报错就标出来附上修法，只显示命中位置前后几行。
+
+`gh run view <id> --log-failed` 的原始输出有一百多行，每行都带 job、步骤名、ISO 时间戳前缀，真正的报错夹在 fastlane 的 summary 表前面，直接翻很容易看漏。
+
+指定某一次用 `--run <id>`，想看完整日志加 `--all`，只想按行数截取用 `--tail N --no-hints`。
 
 ## 报错对照
 
@@ -474,10 +513,11 @@ cmd.exe 按 OEM 代码页解码 UTF-8 输出。`ship.cmd` 里执行过 `chcp 650
 | `ship.py setup` | 生成整套证书链 | 调用 API 创建资源，可能占证书名额 |
 | `ship.py secrets` | 把 8 个 secrets 写入 GitHub | 改仓库设置 |
 | `ship.py release` | build 号加一、推送、构建、挂测试组 | 占一个 build 号，不可撤销 |
+| `ship.py logs` | 把失败流水线的日志压到能读的长度 | 只读 |
 | `ship.py status` | 查看分发状态 | 只读 |
 | `testflight.py attach` | 单独挂 build、加测试员、补 TestFlight 文案 | 写 App Store Connect |
 | `make-icon.py` | 生成图标与 asset catalog | 写文件 |
-| `selftest.py` | 113 条离线断言 | 只读 |
+| `selftest.py` | 126 条离线断言 | 只读 |
 
 `setup` 的常用参数：
 

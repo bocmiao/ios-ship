@@ -13,20 +13,22 @@
 其中大部分只能靠点后台，而且每一步都在不同的页面、用不同的术语。
 做过一遍之后全忘光，下次换项目再来一遍。
 
-这个脚本把整条链路固化下来，一条命令跑完，并且**在做之前先告诉你哪一步会失败**。
+这个脚本把整条链路固化下来，一条命令跑完。
 
-## 八个子命令
+## 十个子命令
 
+    ship.py new        从 template 建一个新项目（复制 + 改名一次做完）
     ship.py rename     一次改完工程名与 Bundle ID（11 处，手工改必漏）
     ship.py doctor     全面体检，只读，不改变任何东西
     ship.py setup      首次配置：证书 + p12 + Bundle ID + 描述文件 + secrets.txt
     ship.py secrets    把 secrets.txt 里的值写进 GitHub 仓库
     ship.py release    发版：build 号 +1 → 推送 → 触发构建 → 等 VALID → 挂进测试组
+    ship.py logs       把失败流水线的日志压到能读的长度
     ship.py status     分发状态速查（比 doctor 短）
     ship.py init       生成 ship.config.json（可选，能从 project.yml 推断）
     ship.py deps       检查/安装依赖
 
-建议顺序：`rename` → `deps` → `init` → `doctor` → `setup`（仅首次）→ `secrets`（仅首次）→ `release`。
+建议顺序：`new`（或 `rename`）→ `deps` → `init` → `doctor` → `setup`（仅首次）→ `secrets`（仅首次）→ `release`。失败后跑 `logs`。
 
 ## 为什么要有 doctor
 
@@ -416,6 +418,14 @@ def cmd_doctor(args):
 
     # ---------- 2. 凭据与账号
     rep.start("凭据与账号")
+    # make_jwt 里一 import 就抛 ModuleNotFoundError，把「装个包」这件事
+    # 变成一段谁也看不懂的堆栈。先拦下来，后面几组都要用它，直接收尾。
+    if not check_dep("import cryptography"):
+        rep.bad("缺 python 包 cryptography",
+                fix="跑 `python tools/ship.py deps`\n"
+                    "它负责证书申请与 API 鉴权（生成 CSR、签 ES256 JWT），\n"
+                    "缺了它第 2 组之后的检查都跑不了")
+        return rep.summary()
     token, secrets, err = api_token(args)
     if err:
         rep.bad(err, fix="确认 cert/secrets.txt 里有 ASC_KEY_ID / ASC_ISSUER_ID")
@@ -1043,6 +1053,194 @@ def cmd_deps(args):
     return 0
 
 
+# ------------------------------------------------------------------ logs
+
+# 上传能失败的报错就那么几种，但它们在日志里淹没在几百行编译输出中间。
+# 命中这里就把含义和修法直接标出来，剩下的让用户自己翻。
+LOG_HINTS = [
+    ("CFBundleIconName",
+     "asset catalog 没编进包：project.yml 要有 ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon"),
+    ("90713", "同上，最终原因是 Info.plist 里没有 CFBundleIconName"),
+    ("90022", "缺 120×120 图标，或者图标带 alpha 通道（png 必须不透明）"),
+    ("MAC verification failed",
+     "p12 的加密算法 macOS 不认，得用 3DES + SHA1（docs/pitfalls.md 第 9 条）"),
+    ("bundle version must be higher",
+     "build 号撞了：CURRENT_PROJECT_VERSION 要大于线上已有的最新号"),
+    ("No profiles for", "描述文件没匹配上这个 Bundle ID，重跑 `ship.py setup`"),
+    ("doesn't include signing certificate", "描述文件里缺这张证书，得重新生成 profile"),
+    ("Couldn't find app", "ASC 里没有这个 Bundle ID 对应的 App 记录，先手工建一个"),
+    ("INVALID_STATE",
+     "CFBundleShortVersionString 与 ASC 里已有的版本对不上（看 MARKETING_VERSION）"),
+    ("Authentication failed", "API Key 被拒：确认是团队密钥，且 Key ID / Issuer ID 没抄错"),
+]
+
+
+def _strip_ansi(s):
+    """去掉 ANSI 颜色码。
+
+    altool 的输出自带颜色，gh 原样透传。要处理两种形态：
+    真实的 ESC 字节，以及被某些工具写成字面 `^[[31m` 的转义序列。
+    """
+    s = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", s)
+    s = re.sub(r"\^\[\[[0-9;?]*[ -/]*[@-~]", "", s)
+    return s
+
+
+def _strip_ts(rest):
+    """gh 日志每行是 `<ISO 时间戳> <内容>`，时间戳固定以 Z + 空格结束。"""
+    m = re.match(r"\d{4}-\d{2}-\d{2}T[\d:.]+Z\s(.*)$", rest)
+    return m.group(1) if m else rest
+
+
+def _parse_run_log(text):
+    """切成 [(job, step, 内容)]。
+
+    gh 的行格式是 `job \\t step \\t 时间戳 内容`。以前直接把 --log-failed
+    的原始输出丢给人看，一屏里 200 行都是 build / 上传到 TestFlight 这样的前缀。
+    只有颜色码没有内容的行（altool 每段的收尾）直接丢掉。
+    """
+    rows = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            job, step, body = parts[0].strip(), parts[1].strip(), parts[2]
+        elif len(parts) == 2:
+            job, step, body = parts[0].strip(), "", parts[1]
+        else:
+            job, step, body = "", "", line
+        body = _strip_ansi(_strip_ts(body)).rstrip()
+        if not body.strip():
+            continue
+        rows.append((job, step, body))
+    return rows
+
+
+def cmd_logs(args):
+    """把一次失败的日志从几百行里挑出有用的部分。
+
+    release 失败时只打一行 `gh run view <id> --log-failed` 让用户自己去跑，
+    跑出来的原始输出在 cmd 里根本读不了：每行都带 job / step / 时间戳前缀，
+    真正的报错夹在中间。这条命令做的事就是把它压到能读的密度。
+    """
+    want_run = (args.run_id or "").strip()
+    runs = []
+
+    if not want_run:
+        rc, out, err = gh("run", "list", "--workflow=ios.yml", "--limit", "10",
+                          "--json", "databaseId,conclusion,status,createdAt")
+        if rc == 127:
+            bad("没装 gh CLI", "从 https://cli.github.com 装一个，然后 gh auth login")
+            return 1
+        if rc != 0:
+            bad("读不到流水线列表", (err or out).strip()[:200])
+            return 1
+        try:
+            runs = json.loads(out or "[]")
+        except Exception:
+            runs = []
+        if not runs:
+            note("还没有 ios.yml 的运行记录。第一次发版跑 `ship.py release`。")
+            return 0
+        failed = [r for r in runs if r.get("conclusion") == "failure"]
+        target = failed[0] if failed else runs[0]
+        run_id = str(target["databaseId"])
+        conclusion = target.get("conclusion") or target.get("status") or "?"
+    else:
+        run_id = want_run
+        conclusion = "?"
+
+    h(f"流水线 {run_id}（{conclusion}）")
+
+    # 最近一次成功时别装作用力翻日志，直接说清楚
+    if conclusion == "success" and not args.all:
+        ok("这次是成功的，没有失败日志")
+        note("想看完整输出加 --all；指定某一次用 --run <id>")
+        return 0
+
+    if args.all:
+        rc, out, err = gh("run", "view", run_id, "--log")
+    else:
+        rc, out, err = gh("run", "view", run_id, "--log-failed")
+    if rc != 0:
+        bad(f"取不到日志（gh 返回 {rc}）", (err or out).strip()[:200])
+        note("运行还没结束的话，用 `gh run watch <id>` 盯着，结束后再跑这条")
+        return 1
+
+    rows = _parse_run_log(out)
+    if not rows:
+        note("这次运行没有输出。")
+        return 0
+
+    # 命中已知报错，并且记下它周围的行走范围。
+    # 只截末尾 N 行是不够的：fastlane 失败后会打一个 summary 表，
+    # 把真正的 altool 报错顶到几十行之前，正好被截掉。
+    hits = []
+    hit_span = []
+    seen_hint = set()
+    seen_idx = set()
+    for idx, (_job, step, text) in enumerate(rows if not args.no_hints else []):
+        low = text.lower()
+        for sig, hint in LOG_HINTS:
+            if sig.lower() in low:
+                if hint not in seen_hint:
+                    seen_hint.add(hint)
+                    hits.append((sig, hint, step))
+                for k in range(max(0, idx - 6), min(len(rows), idx + 4)):
+                    if k not in seen_idx:
+                        seen_idx.add(k)
+                        hit_span.append(k)
+                break
+
+    if hits:
+        print()
+        for sig, hint, step in hits:
+            print(f"  {C.Y}>>{C.X} 命中 {C.B}{sig}{C.X}：{hint}")
+            if step:
+                print(f"     {C.D}在步骤「{step}」{C.X}")
+
+    if hit_span:
+        hit_span.sort()
+        if len(hit_span) > 80:
+            hit_span = hit_span[:80]
+        show_idx = hit_span
+        shown = [rows[k] for k in hit_span]
+    else:
+        total = len(rows)
+        tail_n = total if args.tail <= 0 else min(args.tail, total)
+        show_idx = list(range(total - len(rows[-tail_n:]), total)) if tail_n else []
+        shown = rows[-tail_n:]
+
+    # 一次失败通常全落在同一个步骤里。每行都顶着「上传到 TestFlight」
+    # 除了占宽度没有信息量，改成标题里说一次。
+    steps = {step for _j, step, _t in shown if step}
+    single_step = steps.pop() if len(steps) == 1 else ""
+
+    print()
+    if hit_span:
+        h(f"命中位置附近 {len(shown)} 行" + (f"（「{single_step}」）" if single_step else ""))
+    else:
+        h(f"最后 {len(shown)} 行" + (f"（全部来自「{single_step}」）" if single_step else ""))
+
+    prev = None
+    for i, (_job, step, text) in enumerate(shown):
+        if prev is not None and show_idx[i] != prev + 1:
+            print(f"  {C.D}...{C.X}")
+        prev = show_idx[i]
+        prefix = ""
+        if step and not single_step and not text.startswith(step):
+            prefix = f"{C.D}{step[:14]:<14}{C.X} "
+        print(f"  {prefix}{text}")
+
+    print()
+    if hit_span:
+        note(f"共 {len(rows)} 行，只显示命中的那几处。看全末尾 60 行：ship.py logs --tail 60 --no-hints")
+    else:
+        note(f"共 {len(rows)} 行，只显示末尾 {len(shown)} 行。看全部：ship.py logs --tail 0")
+    return 0
+
+
 # ------------------------------------------------------------------ 入口
 
 def main():
@@ -1060,7 +1258,7 @@ def main():
     )
     ap.add_argument("action",
                     choices=["new", "doctor", "setup", "secrets", "release", "status",
-                             "init", "deps", "rename"],
+                             "init", "deps", "rename", "logs"],
                     help="要做什么")
     ap.add_argument("target", nargs="?", default="",
                     help="new 的目标目录名，例如 PhotoHelper")
@@ -1081,6 +1279,14 @@ def main():
                     help="deps 时连可选的 Pillow 一起装")
     ap.add_argument("--feedback-email", default="",
                     help="TestFlight 反馈邮箱，默认取 ship.config.json 或 noreply@example.com")
+    ap.add_argument("--run", dest="run_id", default="", metavar="ID",
+                    help="logs 时指定 run id，默认看最近一次失败")
+    ap.add_argument("--tail", type=int, default=60, metavar="N",
+                    help="logs 显示末尾多少行，0 表示全部（默认 60）")
+    ap.add_argument("--all", action="store_true",
+                    help="logs 时取完整日志，而不只是失败步骤")
+    ap.add_argument("--no-hints", dest="no_hints", action="store_true",
+                    help="logs 时不按已知报错挑行，直接输末尾 N 行")
     args = ap.parse_args()
 
     # ---------- new：从 template 建一个新项目，只在仓库里跑
@@ -1090,6 +1296,10 @@ def main():
     # ---------- deps：查/装依赖，不碰项目配置
     if args.action == "deps":
         return cmd_deps(args)
+
+    # ---------- logs：只读流水线日志，不碰本地配置
+    if args.action == "logs":
+        return cmd_logs(args)
 
     # ---------- init：只生成样板配置，不动任何东西
     if args.action == "init":
@@ -1156,6 +1366,15 @@ def main():
     args.cfg = cfg
     args.feedback_email = (args.feedback_email or cfg.get("feedbackEmail")
                            or "noreply@example.com")
+
+    # setup / release / status 都要签 JWT（生成 CSR、调 API）。
+    # 缺包时 make_jwt 抛的是 ModuleNotFoundError 加一长串堆栈，
+    # 用户看到的第一行是 "No module named 'cryptography'"，看不出接下来该干什么。
+    if args.action in ("setup", "release", "status") and not check_dep("import cryptography"):
+        print(f"\n{C.R}缺 python 包 cryptography{C.X}\n")
+        print("  跑 `python tools/ship.py deps` 装上。")
+        print("  它负责生成 CSR 和签 ES256 JWT，这三条命令都要用。")
+        return 1
 
     if args.action == "doctor":
         return cmd_doctor(args)
